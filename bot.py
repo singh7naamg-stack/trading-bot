@@ -1,40 +1,44 @@
+import os
 import requests
 import asyncio
-import time
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-TOKEN = "8790244435:AAGPxwzPh7g09DvH8RC3sj5irsL2fcYCYQ4"
+# =========================
+# CONFIG
+# =========================
+TOKEN = os.getenv("TOKEN")
 CHAT_ID = None
 
 # =========================
-# TRACKING SYSTEM (WIN/LOSS)
+# TRACKING SYSTEM
 # =========================
 trade_history = {}
 win_count = 0
 loss_count = 0
 
 # =========================
-# UI
+# UI MENU
 # =========================
 def menu():
     return ReplyKeyboardMarkup(
-        [["TRADE"], ["AUTO"], ["WIN"], ["LOSS"]],
+        [["TRADE"], ["WIN", "LOSS"]],
         resize_keyboard=True
     )
 
 # =========================
-# SYMBOLS
+# GET SYMBOLS (BINANCE SCAN)
 # =========================
 def get_symbols():
-
     try:
-        data = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=5).json()
+        data = requests.get(
+            "https://api.binance.com/api/v3/ticker/24hr",
+            timeout=5
+        ).json()
 
         symbols = []
 
         for x in data:
-
             sym = x["symbol"]
 
             if not sym.endswith("USDT"):
@@ -63,7 +67,6 @@ def get_symbols():
 # CANDLES
 # =========================
 def get_closes(symbol):
-
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=40"
         data = requests.get(url, timeout=5).json()
@@ -80,7 +83,6 @@ def get_closes(symbol):
 # RSI
 # =========================
 def rsi(prices):
-
     gains, losses = [], []
 
     for i in range(1, len(prices)):
@@ -101,7 +103,6 @@ def rsi(prices):
 # EMA
 # =========================
 def ema(prices):
-
     k = 2 / (len(prices) + 1)
     e = prices[0]
 
@@ -114,14 +115,12 @@ def ema(prices):
 # MOMENTUM
 # =========================
 def momentum(prices):
-
     return (prices[-1] - prices[-6]) / prices[-6] * 100
 
 # =========================
-# SCORE
+# SCORE ENGINE
 # =========================
 def score(prices):
-
     price = prices[-1]
     e = ema(prices)
     r = rsi(prices)
@@ -147,10 +146,9 @@ def score(prices):
     return max(0, min(100, s))
 
 # =========================
-# CONFIDENCE ENGINE
+# CONFIDENCE
 # =========================
 def confidence(prices, sc):
-
     price = prices[-1]
     e = ema(prices)
     r = rsi(prices)
@@ -180,7 +178,6 @@ def confidence(prices, sc):
 # TRADE LOGIC
 # =========================
 def trade(symbol):
-
     prices = get_closes(symbol)
 
     if not prices:
@@ -188,22 +185,16 @@ def trade(symbol):
 
     price = prices[-1]
 
-    if price <= 0:
-        return None
-
     sc = score(prices)
     conf = confidence(prices, sc)
 
-    # ❗ ONLY HIGH QUALITY FOR ALERT SYSTEM
     if sc < 70:
         return None
 
     e = ema(prices)
     r = rsi(prices)
 
-    # BUY
     if price > e and r < 60:
-
         return {
             "symbol": symbol,
             "type": "BUY",
@@ -214,9 +205,7 @@ def trade(symbol):
             "tp": price * 1.05
         }
 
-    # SELL
     if price < e and r > 40:
-
         return {
             "symbol": symbol,
             "type": "SELL",
@@ -230,16 +219,13 @@ def trade(symbol):
     return None
 
 # =========================
-# SCAN
+# SCAN MARKET
 # =========================
 def scan_market():
-
     results = []
 
     for sym in get_symbols():
-
         t = trade(sym)
-
         if t:
             results.append(t)
 
@@ -248,16 +234,13 @@ def scan_market():
     return results[:10]
 
 # =========================
-# REAL-TIME ALERT LOOP
+# ALERT LOOP (BACKGROUND)
 # =========================
 async def alert_loop(app):
-
     while True:
-
         data = scan_market()
 
         for d in data:
-
             if d["confidence"] < 80:
                 continue
 
@@ -286,10 +269,9 @@ TP: {d['tp']:.4f}
         await asyncio.sleep(60)
 
 # =========================
-# WIN / LOSS MARKING
+# HANDLER
 # =========================
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     global win_count, loss_count
 
     text = update.message.text.upper()
@@ -300,7 +282,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "🔥 TOP 10 HIGH CONFIDENCE SETUPS\n\n"
 
         for i, d in enumerate(data, 1):
-
             msg += f"#{i} {d['symbol']} ({d['type']})\n"
             msg += f"Conf: {d['confidence']}%\n"
             msg += f"Entry: {d['entry']:.4f}\n\n"
@@ -319,30 +300,28 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # =========================
-# START
+# START COMMAND
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     global CHAT_ID
     CHAT_ID = update.message.chat_id
 
     await update.message.reply_text(
-        "🚀 PRO TRADING SYSTEM v27\nCloud Ready + Alerts + Tracking",
+        "🚀 PRO TRADING BOT RUNNING ON CLOUD",
         reply_markup=menu()
     )
 
 # =========================
-# RUN (CLOUD READY)
+# APP SETUP (FIXED RENDER VERSION)
 # =========================
-app = ApplicationBuilder().token(TOKEN).build()
+async def post_init(app):
+    asyncio.create_task(alert_loop(app))
+
+app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
-async def main():
-    asyncio.create_task(alert_loop(app))
-    await app.run_polling()
-
-print("Bot Running (Cloud Ready Mode)...")
+print("Bot Running on Cloud...")
 
 app.run_polling()
