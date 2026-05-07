@@ -7,25 +7,23 @@ from ta.volatility import AverageTrueRange
 
 async def fetch_and_analyze(exchange, symbol):
     try:
-        # Fetching 100 candles (1h timeframe) for trend analysis
+        # Fetching 100 candles (1h timeframe)
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         if not ohlcv or len(ohlcv) < 50: return None
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # --- Indicator Calculations ---
+        # Indicators
         df['RSI_14'] = RSIIndicator(close=df['close'], window=14).rsi()
         df['EMA_20'] = EMAIndicator(close=df['close'], window=20).ema_indicator()
         df['EMA_50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
         df['ATR_14'] = AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
         
         last = df.iloc[-1]
-        
-        # --- Scoring Logic ---
         score = 0
         direction = "NEUTRAL"
         
-        # Trend Check (30 Points)
+        # Trend (30 pts)
         if last['EMA_20'] > last['EMA_50']:
             score += 30
             direction = "LONG"
@@ -33,27 +31,18 @@ async def fetch_and_analyze(exchange, symbol):
             score += 30
             direction = "SHORT"
             
-        # Momentum Check (40 Points)
-        if direction == "LONG" and last['RSI_14'] < 45: 
-            score += 40
-        elif direction == "SHORT" and last['RSI_14'] > 55: 
-            score += 40
+        # Momentum (40 pts)
+        if direction == "LONG" and last['RSI_14'] < 45: score += 40
+        elif direction == "SHORT" and last['RSI_14'] > 55: score += 40
         
-        entry = last['close']
-        atr = last['ATR_14']
-        
-        # Only return if the score is worth looking at
         if score >= 60:
+            entry = last['close']
+            atr = last['ATR_14']
             if direction == "LONG":
-                sl = entry - (atr * 1.5)
-                tp = entry + (atr * 3)
-                icon = "🟢"
+                sl, tp, icon = entry - (atr * 1.5), entry + (atr * 3), "🟢"
             else:
-                sl = entry + (atr * 1.5)
-                tp = entry - (atr * 3)
-                icon = "🔴"
+                sl, tp, icon = entry + (atr * 1.5), entry - (atr * 3), "🔴"
             
-            # Risk Management: Calculate leverage for ~1% risk
             sl_pct = abs(entry - sl) / entry
             lev = min(20, round(0.01 / sl_pct)) if sl_pct > 0 else 1
             
@@ -70,13 +59,17 @@ async def get_top_signals():
     exchange = ccxt.binance({'options': {'defaultType': 'future'}})
     try:
         markets = await exchange.load_markets()
-        # Filter for top 50 USDT Futures pairs
-        symbols = [s for s in markets if '/USDT' in s and ':' not in s][:50]
+        # Reduce to top 30 pairs to prevent IP ban
+        symbols = [s for s in markets if '/USDT' in s and ':' not in s][:30]
         
-        tasks = [fetch_and_analyze(exchange, s) for s in symbols]
-        all_results = await asyncio.gather(*tasks)
-        
-        signals = [s for s in all_results if s is not None]
+        signals = []
+        for s in symbols:
+            res = await fetch_and_analyze(exchange, s)
+            if res:
+                signals.append(res)
+            # 🛑 CRITICAL: This 0.2s pause prevents the "418 Too Many Requests" error
+            await asyncio.sleep(0.2) 
+            
         return sorted(signals, key=lambda x: x['score'], reverse=True)
     finally:
         await exchange.close()
