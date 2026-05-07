@@ -1,5 +1,7 @@
 python-telegram-bot
 python-dotenv
 ccxt
+numpy<2.0.0
+scipy
 pandas
-pandas-ta==0.3.14b0
+pandas-ta
