@@ -1,66 +1,78 @@
 import os
 import asyncio
+import logging
 from dotenv import load_dotenv
-
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+# Import the logic we just created in engine.py
+from engine import get_top_signals
+
+# Logging setup to see errors in Render logs
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 
-# ----------------------------
-# LOAD ENV VARIABLES
-# ----------------------------
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
-if not TOKEN:
-    raise ValueError("BOT_TOKEN is missing. Add it in Render Environment Variables")
+# --- COMMANDS ---
 
-# ----------------------------
-# BASIC COMMANDS
-# ----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚀 Bot is running successfully!\nSend /signals to test."
+        "🚀 **Trading Scanner Bot Active**\n\n"
+        "I scan 50+ Binance Futures pairs for high-probability setups.\n\n"
+        "Use /signals to start the scan.",
+        parse_mode='Markdown'
     )
 
 async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Placeholder for your real logic later
-    msg = (
-        "📊 TOP 10 SIGNALS (Demo Structure)\n\n"
-        "1️⃣ BTC/USD - STRONG BUY\n"
-        "2️⃣ ETH/USD - BUY\n"
-        "3️⃣ GOLD - WEAK BUY\n"
-        "4️⃣ NASDAQ - NEUTRAL\n"
-        "5️⃣ EUR/USD - SELL\n"
-        "6️⃣ GBP/USD - STRONG SELL\n"
-        "7️⃣ SOL/USD - BUY\n"
-        "8️⃣ XRP/USD - NEUTRAL\n"
-        "9️⃣ DXY - BUY\n"
-        "🔟 OIL - SELL\n\n"
-        "⚠️ Note: Logic engine will be upgraded next."
-    )
+    # Send a "Processing" message so the user knows the bot is working
+    status_msg = await update.message.reply_text("🔍 Scanning Binance Futures markets... Please wait.")
+    
+    try:
+        # Call the engine to get the top 5 trades
+        results = await get_top_signals()
+        
+        if not results:
+            await status_msg.edit_text("❌ No strong signals found right now. Market is neutral.")
+            return
 
-    await update.message.reply_text(msg)
+        report = "🚀 **TOP 5 TRADING SIGNALS**\n\n"
+        
+        for res in results:
+            report += (
+                f"💎 **{res['symbol']}** ({res['dir']})\n"
+                f"🎯 **Entry:** `{res['entry']:.4f}`\n"
+                f"✅ **TP:** `{res['tp']:.4f}`\n"
+                f"🚫 **SL:** `{res['sl']:.4f}`\n"
+                f"⚖️ **Leverage:** `{res['lev']}x` (Risk 1%)\n"
+                f"⭐ **Confidence:** `{res['score']}%` \n\n"
+                f"----------------------------\n\n"
+            )
 
-# ----------------------------
-# MAIN APP
-# ----------------------------
+        # Update the initial message with the final report
+        await status_msg.edit_text(report, parse_mode='Markdown')
+
+    except Exception as e:
+        logging.error(f"Error in signals command: {e}")
+        await status_msg.edit_text("⚠️ An error occurred while scanning. Check Render logs.")
+
+# --- MAIN APP ---
+
 def main():
-    print("🚀 REAL SIGNAL BOT RUNNING")
+    if not TOKEN:
+        logging.error("BOT_TOKEN is missing!")
+        return
 
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("signals", signals))
 
-    # IMPORTANT: Render-safe polling
+    print("🚀 Bot is running...")
     app.run_polling(drop_pending_updates=True)
 
-# ----------------------------
-# START
-# ----------------------------
 if __name__ == "__main__":
     main()
