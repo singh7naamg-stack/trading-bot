@@ -1,58 +1,66 @@
-import asyncio
 import os
+import asyncio
 from dotenv import load_dotenv
 
-load_dotenv()
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes
+)
 
+# ----------------------------
+# LOAD ENV VARIABLES
+# ----------------------------
+load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
+if not TOKEN:
+    raise ValueError("BOT_TOKEN is missing. Add it in Render Environment Variables")
 
-# ---------------- COMMANDS ----------------
-
+# ----------------------------
+# BASIC COMMANDS
+# ----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚀 Bot is LIVE!\n\nSend /signal to get analysis signal."
+        "🚀 Bot is running successfully!\nSend /signals to test."
     )
 
+async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Placeholder for your real logic later
+    msg = (
+        "📊 TOP 10 SIGNALS (Demo Structure)\n\n"
+        "1️⃣ BTC/USD - STRONG BUY\n"
+        "2️⃣ ETH/USD - BUY\n"
+        "3️⃣ GOLD - WEAK BUY\n"
+        "4️⃣ NASDAQ - NEUTRAL\n"
+        "5️⃣ EUR/USD - SELL\n"
+        "6️⃣ GBP/USD - STRONG SELL\n"
+        "7️⃣ SOL/USD - BUY\n"
+        "8️⃣ XRP/USD - NEUTRAL\n"
+        "9️⃣ DXY - BUY\n"
+        "🔟 OIL - SELL\n\n"
+        "⚠️ Note: Logic engine will be upgraded next."
+    )
 
-async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # SIMPLE NON-RANDOM LOGIC EXAMPLE (placeholder strategy)
-    # You can later connect real API like Binance
+    await update.message.reply_text(msg)
 
-    signals = [
-        "1️⃣ STRONG BUY - Trend: Uptrend confirmed",
-        "2️⃣ BUY - Momentum increasing",
-        "3️⃣ BUY - Pullback zone",
-        "4️⃣ NEUTRAL - Wait for confirmation",
-        "5️⃣ WEAK BUY - High risk",
-        "6️⃣ NEUTRAL",
-        "7️⃣ WEAK SELL",
-        "8️⃣ SELL",
-        "9️⃣ STRONG SELL",
-        "10️⃣ EXIT ZONE"
-    ]
-
-    text = "📊 REAL ANALYSIS SIGNALS\n\n" + "\n".join(signals)
-
-    await update.message.reply_text(text)
-
-
-# ---------------- MAIN ----------------
-
+# ----------------------------
+# MAIN APP
+# ----------------------------
 def main():
-    if not TOKEN:
-        print("❌ BOT TOKEN NOT FOUND")
-        return
+    print("🚀 REAL SIGNAL BOT RUNNING")
 
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("signal", signal))
+    app.add_handler(CommandHandler("signals", signals))
 
-    print("🚀 BOT RUNNING (FIXED VERSION)")
+    # IMPORTANT: Render-safe polling
+    app.run_polling(drop_pending_updates=True)
 
-    app.run_polling()
-
-
+# ----------------------------
+# START
+# ----------------------------
 if __name__ == "__main__":
     main()
