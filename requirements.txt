@@ -1,6 +1,6 @@
 python-telegram-bot
 python-dotenv
 ccxt
-numpy>=1.26.0,<2.0.0
-pandas>=2.2.2
-pandas-ta
+numpy<2.0.0
+pandas<3.0.0
+https://github.com/twopirllc/pandas-ta/archive/refs/heads/master.zip
