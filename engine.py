@@ -1,17 +1,20 @@
 import ccxt.async_support as ccxt
 import pandas as pd
 import asyncio
-# Using the stable 'ta' library instead of 'pandas-ta'
+import os
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator
 from ta.volatility import AverageTrueRange
 
 async def fetch_and_analyze(exchange, symbol):
     try:
+        # Fetching 100 candles (1h timeframe)
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+        if not ohlcv: return None
+        
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # --- CALCULATE INDICATORS (Stable Method) ---
+        # Indicator Calculations
         df['RSI_14'] = RSIIndicator(close=df['close'], window=14).rsi()
         df['EMA_20'] = EMAIndicator(close=df['close'], window=20).ema_indicator()
         df['EMA_50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
@@ -19,21 +22,21 @@ async def fetch_and_analyze(exchange, symbol):
         
         last = df.iloc[-1]
         
-        # --- SCORING & TREND LOGIC ---
         score = 0
         direction = "NEUTRAL"
         
+        # Trend Logic
         if last['EMA_20'] > last['EMA_50']:
             score += 30
             direction = "LONG"
         else:
             score += 30
             direction = "SHORT"
-        
+            
+        # RSI Logic
         if direction == "LONG" and last['RSI_14'] < 40: score += 40
         if direction == "SHORT" and last['RSI_14'] > 60: score += 40
         
-        # --- TRADE PARAMETERS ---
         entry = last['close']
         atr = last['ATR_14']
         
@@ -48,24 +51,29 @@ async def fetch_and_analyze(exchange, symbol):
                 icon = "🔴"
             
             sl_pct = abs(entry - sl) / entry
-            lev = min(20, round(0.01 / sl_pct)) if sl_pct != 0 else 1
+            lev = min(20, round(0.01 / sl_pct)) if sl_pct > 0 else 1
             
             return {
                 "symbol": symbol, "score": score, "dir": f"{icon} {direction}",
                 "entry": entry, "tp": tp, "sl": sl, "lev": lev
             }
         return None
-    except Exception as e:
+    except:
         return None
 
 async def get_top_signals():
-    exchange = ccxt.binance({'options': {'defaultType': 'future'}})
+    # SWITCHED TO BYBIT to avoid the Render location block
+    exchange = ccxt.bybit({'options': {'defaultType': 'linear'}})
     try:
         markets = await exchange.load_markets()
-        symbols = [s for s in markets if '/USDT' in s][:50]
+        # Get top 50 USDT perpetual pairs
+        symbols = [s for s in markets if '/USDT' in s and ':' not in s][:50]
+        
         tasks = [fetch_and_analyze(exchange, s) for s in symbols]
         all_results = await asyncio.gather(*tasks)
+        
         signals = [s for s in all_results if s is not None]
         return sorted(signals, key=lambda x: x['score'], reverse=True)[:10]
     finally:
+        # This fixes the "Unclosed session" error in your logs
         await exchange.close()
