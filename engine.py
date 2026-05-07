@@ -1,79 +1,89 @@
-import ccxt.async_support as ccxt
-import pandas as pd
+import os
 import asyncio
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
-from ta.volatility import AverageTrueRange
+import logging
+from dotenv import load_dotenv
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-async def fetch_and_analyze(exchange, symbol):
-    try:
-        # Fetching 100 candles (1h timeframe)
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
-        if not ohlcv: return None
-        
-        df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        
-        # --- Indicators ---
-        df['RSI_14'] = RSIIndicator(close=df['close'], window=14).rsi()
-        df['EMA_20'] = EMAIndicator(close=df['close'], window=20).ema_indicator()
-        df['EMA_50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
-        df['ATR_14'] = AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
-        
-        last = df.iloc[-1]
-        
-        # --- Logic ---
-        score = 0
-        direction = "NEUTRAL"
-        
-        if last['EMA_20'] > last['EMA_50']:
-            score += 30
-            direction = "LONG"
-        else:
-            score += 30
-            direction = "SHORT"
-            
-        if direction == "LONG" and last['RSI_14'] < 40: score += 40
-        if direction == "SHORT" and last['RSI_14'] > 60: score += 40
-        
-        entry = last['close']
-        atr = last['ATR_14']
-        
-        if score >= 60:
-            if direction == "LONG":
-                sl = entry - (atr * 1.5)
-                tp = entry + (atr * 3)
-                icon = "🟢"
-            else:
-                sl = entry + (atr * 1.5)
-                tp = entry - (atr * 3)
-                icon = "🔴"
-            
-            sl_pct = abs(entry - sl) / entry
-            lev = min(20, round(0.01 / sl_pct)) if sl_pct > 0 else 1
-            
-            return {
-                "symbol": symbol, "score": score, "dir": f"{icon} {direction}",
-                "entry": entry, "tp": tp, "sl": sl, "lev": lev
-            }
-        return None
-    except:
-        return None
+# Import the engine
+from engine import get_top_signals
 
-async def get_top_signals():
-    # SET TO BINANCE (Singapore region supports this)
-    exchange = ccxt.binance({
-        'options': {'defaultType': 'future'},
-        # 'setSandboxMode': True # <-- Uncomment this line to use Binance TESTNET
-    })
+# Professional logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
+# This variable will store your chat ID automatically after you type /start
+user_chat_id = None 
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global user_chat_id
+    user_chat_id = update.effective_chat.id
+    await update.message.reply_text(
+        "🚀 **QuestLife Auto-Pilot Active**\n\n"
+        "I am now scanning the markets every 15 minutes.\n"
+        "I will alert you ONLY if I find a signal with a score of **70% or higher**.\n\n"
+        "Use /signals to force a manual scan at any time.",
+        parse_mode='Markdown'
+    )
+
+async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status_msg = await update.message.reply_text("🔍 Scanning markets manually...")
+    await run_scan_and_send(context.bot, update.effective_chat.id, threshold=60)
+    await status_msg.delete()
+
+async def auto_scan_job(context: ContextTypes.DEFAULT_TYPE):
+    """Background task that runs every 15 minutes"""
+    if user_chat_id:
+        logger.info("Running automatic background scan...")
+        # Only notify for VERY strong signals (70+)
+        await run_scan_and_send(context.bot, user_chat_id, threshold=70, is_auto=True)
+
+async def run_scan_and_send(bot, chat_id, threshold, is_auto=False):
     try:
-        markets = await exchange.load_markets()
-        # Filter for top USDT Futures pairs
-        symbols = [s for s in markets if '/USDT' in s and ':' not in s][:50]
+        results = await get_top_signals()
+        filtered = [s for s in results if s['score'] >= threshold]
         
-        tasks = [fetch_and_analyze(exchange, s) for s in symbols]
-        all_results = await asyncio.gather(*tasks)
+        if not filtered:
+            if not is_auto:
+                await bot.send_message(chat_id=chat_id, text="⚠️ No strong signals found right now.")
+            return
+
+        report = f"{'🚨 **HIGH-QUALITY AUTO-ALERT**' if is_auto else '🚀 **LIVE SIGNALS**'}\n\n"
+        for res in filtered:
+            report += (
+                f"💎 **{res['symbol']}** ({res['dir']})\n"
+                f"🎯 **Entry:** `{res['entry']}`\n"
+                f"✅ **TP:** `{res['tp']:.4f}` | 🚫 **SL:** `{res['sl']:.4f}`\n"
+                f"⚖️ **Lev:** `{res['lev']}x` | ⭐ **Score:** `{res['score']}%` \n\n"
+                f"----------------------------\n\n"
+            )
         
-        signals = [s for s in all_results if s is not None]
-        return sorted(signals, key=lambda x: x['score'], reverse=True)[:10]
-    finally:
-        await exchange.close()
+        await bot.send_message(chat_id=chat_id, text=report, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Scan error: {e}")
+
+def main():
+    if not TOKEN:
+        logger.error("BOT_TOKEN is missing!")
+        return
+
+    # Updated with 30s timeouts for stability
+    app = ApplicationBuilder().token(TOKEN).read_timeout(30).write_timeout(30).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("signals", signals))
+
+    # This sets up the 15-minute background timer
+    job_queue = app.job_queue
+    job_queue.run_repeating(auto_scan_job, interval=900, first=10)
+
+    logger.info("QuestLife Bot starting in Singapore...")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
