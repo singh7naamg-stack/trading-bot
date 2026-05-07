@@ -1,22 +1,24 @@
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import telebot
+import random
+import time
 
-TOKEN = "YOUR_BOT_TOKEN"
+TOKEN = "8790244435:AAGPxwzPh7g09DvH8RC3sj5irsL2fcYCYQ4"
+
+bot = telebot.TeleBot(TOKEN)
 
 # =====================
-# REAL LOGIC ENGINE
+# SIGNAL ENGINE
 # =====================
 
 def generate_signal(symbol):
-    import random
 
     rsi = random.randint(10, 90)
-    ema = random.choice([-1, 1])
-    candle = random.uniform(0, 1)
+    trend = random.choice(["BULLISH", "BEARISH"])
+    momentum = random.uniform(0, 25)
 
     score = 0
 
-    if ema == 1:
+    if trend == "BULLISH":
         score += 35
     else:
         score -= 35
@@ -28,7 +30,7 @@ def generate_signal(symbol):
     else:
         score += 10
 
-    score += candle * 25
+    score += momentum
 
     if score >= 60:
         signal = "🟢 STRONG BUY"
@@ -41,51 +43,67 @@ def generate_signal(symbol):
 
     return {
         "symbol": symbol,
-        "score": round(score, 2),
         "signal": signal,
+        "score": round(score, 2),
         "rsi": rsi
     }
 
 # =====================
-# TELEGRAM HANDLERS
+# COMMANDS
 # =====================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 Bot Active")
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(
+        message,
+        "🚀 PRO SIGNAL BOT ACTIVE\n\nUse /signals"
+    )
 
-async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@bot.message_handler(commands=['signals'])
+def signals(message):
 
-    symbols = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
-               "ADAUSDT","DOGEUSDT","LTCUSDT","AVAXUSDT","LINKUSDT"]
+    symbols = [
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "BNBUSDT",
+        "XRPUSDT",
+        "ADAUSDT",
+        "DOGEUSDT",
+        "AVAXUSDT",
+        "LINKUSDT",
+        "LTCUSDT"
+    ]
 
-    results = [generate_signal(s) for s in symbols]
+    results = []
+
+    for s in symbols:
+        results.append(generate_signal(s))
+
     results.sort(key=lambda x: x["score"], reverse=True)
 
-    msg = "📊 TOP 10 SIGNALS\n\n"
+    msg = "📊 TOP SIGNALS\n\n"
 
     for i, r in enumerate(results, 1):
-        msg += f"{i}. {r['symbol']}\n{r['signal']} | Score: {r['score']}\nRSI: {r['rsi']}\n\n"
 
-    await update.message.reply_text(msg)
+        msg += (
+            f"{i}. {r['symbol']}\n"
+            f"{r['signal']}\n"
+            f"Score: {r['score']}\n"
+            f"RSI: {r['rsi']}\n\n"
+        )
 
-# =====================
-# MAIN (IMPORTANT FIX)
-# =====================
-
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("signals", signals))
-
-    print("🚀 BOT RUNNING (FIXED EVENT LOOP VERSION)")
-
-    # ❌ NO asyncio.run()
-    app.run_polling()
+    bot.reply_to(message, msg)
 
 # =====================
-# START
+# RUN BOT
 # =====================
 
-if __name__ == "__main__":
-    main()
+print("🚀 BOT RUNNING SUCCESSFULLY")
+
+while True:
+    try:
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    except Exception as e:
+        print(f"ERROR: {e}")
+        time.sleep(5)
