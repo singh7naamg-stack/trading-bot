@@ -2,46 +2,54 @@ import os
 import requests
 import asyncio
 from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-# =========================
-# CONFIG
-# =========================
+# =====================================================
+# TOKEN
+# =====================================================
 TOKEN = os.getenv("TOKEN")
-CHAT_ID = None
 
-# =========================
-# TRACKING SYSTEM
-# =========================
+# =====================================================
+# GLOBALS
+# =====================================================
+CHAT_ID = None
 trade_history = {}
 win_count = 0
 loss_count = 0
 
-# =========================
-# UI MENU
-# =========================
+# =====================================================
+# MENU
+# =====================================================
 def menu():
     return ReplyKeyboardMarkup(
-        [["TRADE"], ["WIN", "LOSS"]],
+        [["TRADE"], ["AUTO"], ["WIN"], ["LOSS"]],
         resize_keyboard=True
     )
 
-# =========================
-# GET SYMBOLS (BINANCE SCAN)
-# =========================
+# =====================================================
+# GET SYMBOLS
+# =====================================================
 def get_symbols():
+
     try:
         data = requests.get(
             "https://api.binance.com/api/v3/ticker/24hr",
-            timeout=5
+            timeout=10
         ).json()
 
         symbols = []
 
         for x in data:
-            sym = x["symbol"]
 
-            if not sym.endswith("USDT"):
+            symbol = x["symbol"]
+
+            if not symbol.endswith("USDT"):
                 continue
 
             try:
@@ -50,60 +58,56 @@ def get_symbols():
             except:
                 continue
 
-            if volume < 60_000_000:
+            # Strong liquidity filter
+            if volume < 50000000:
                 continue
 
-            if change < 0.3:
+            # Avoid dead coins
+            if change < 0.8:
                 continue
 
-            symbols.append(sym)
+            symbols.append(symbol)
 
         return symbols[:120]
 
     except:
         return []
 
-# =========================
-# CANDLES
-# =========================
-def get_closes(symbol):
+# =====================================================
+# GET CANDLES
+# =====================================================
+def get_klines(symbol, interval="5m", limit=120):
+
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=40"
-        data = requests.get(url, timeout=5).json()
+        url = (
+            f"https://api.binance.com/api/v3/klines"
+            f"?symbol={symbol}&interval={interval}&limit={limit}"
+        )
 
-        if not isinstance(data, list) or len(data) < 25:
-            return []
+        data = requests.get(url, timeout=10).json()
 
-        return [float(c[4]) for c in data]
+        closes = []
+        volumes = []
+
+        for candle in data:
+            closes.append(float(candle[4]))
+            volumes.append(float(candle[5]))
+
+        return closes, volumes
 
     except:
-        return []
+        return [], []
 
-# =========================
-# RSI
-# =========================
-def rsi(prices):
-    gains, losses = [], []
-
-    for i in range(1, len(prices)):
-        diff = prices[i] - prices[i - 1]
-        gains.append(max(diff, 0))
-        losses.append(abs(min(diff, 0)))
-
-    avg_gain = sum(gains[-14:]) / 14
-    avg_loss = sum(losses[-14:]) / 14
-
-    if avg_loss == 0:
-        return 100
-
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-# =========================
+# =====================================================
 # EMA
-# =========================
-def ema(prices):
-    k = 2 / (len(prices) + 1)
+# =====================================================
+def ema(prices, period=20):
+
+    if len(prices) < period:
+        return 0
+
+    k = 2 / (period + 1)
+
     e = prices[0]
 
     for p in prices:
@@ -111,217 +115,493 @@ def ema(prices):
 
     return e
 
-# =========================
+# =====================================================
+# RSI
+# =====================================================
+def rsi(prices, period=14):
+
+    if len(prices) < period + 1:
+        return 50
+
+    gains = []
+    losses = []
+
+    for i in range(1, len(prices)):
+
+        diff = prices[i] - prices[i - 1]
+
+        gains.append(max(diff, 0))
+        losses.append(abs(min(diff, 0)))
+
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+
+    if avg_loss == 0:
+        return 100
+
+    rs = avg_gain / avg_loss
+
+    return 100 - (100 / (1 + rs))
+
+# =====================================================
 # MOMENTUM
-# =========================
+# =====================================================
 def momentum(prices):
-    return (prices[-1] - prices[-6]) / prices[-6] * 100
 
-# =========================
-# SCORE ENGINE
-# =========================
-def score(prices):
-    price = prices[-1]
-    e = ema(prices)
-    r = rsi(prices)
-    m = momentum(prices)
+    try:
+        return (
+            (prices[-1] - prices[-8])
+            / prices[-8]
+        ) * 100
 
-    s = 50
+    except:
+        return 0
 
-    if price > e:
-        s += 18
-    else:
-        s -= 18
+# =====================================================
+# ATR (VOLATILITY)
+# =====================================================
+def atr(prices):
 
-    if 35 < r < 65:
-        s += 12
-    else:
-        s -= 15
+    if len(prices) < 15:
+        return 0
 
-    if abs(m) > 0.4:
-        s += 12
-    else:
-        s -= 8
+    diffs = []
 
-    return max(0, min(100, s))
+    for i in range(1, len(prices)):
+        diffs.append(abs(prices[i] - prices[i - 1]))
 
-# =========================
-# CONFIDENCE
-# =========================
-def confidence(prices, sc):
-    price = prices[-1]
-    e = ema(prices)
-    r = rsi(prices)
-    m = momentum(prices)
+    return sum(diffs[-14:]) / 14
 
-    c = 50
+# =====================================================
+# VOLUME SCORE
+# =====================================================
+def volume_strength(volumes):
 
-    if price > e:
-        c += 20
-    else:
-        c -= 20
+    try:
 
-    if 40 < r < 60:
-        c += 15
-    else:
-        c -= 10
+        current = volumes[-1]
+        average = sum(volumes[-20:]) / 20
 
-    if abs(m) > 0.5:
-        c += 15
+        if average == 0:
+            return 0
 
-    if sc > 80:
-        c += 10
+        return (current / average) * 100
 
-    return max(0, min(100, c))
+    except:
+        return 0
 
-# =========================
-# TRADE LOGIC
-# =========================
-def trade(symbol):
-    prices = get_closes(symbol)
+# =====================================================
+# HIGHER TIMEFRAME TREND
+# =====================================================
+def trend_confirmation(symbol):
 
-    if not prices:
+    closes_15m, _ = get_klines(symbol, "15m", 60)
+
+    if len(closes_15m) < 30:
         return None
 
-    price = prices[-1]
+    price = closes_15m[-1]
 
-    sc = score(prices)
-    conf = confidence(prices, sc)
+    ema_15 = ema(closes_15m, 20)
 
-    if sc < 70:
-        return None
+    if price > ema_15:
+        return "BUY"
 
-    e = ema(prices)
-    r = rsi(prices)
-
-    if price > e and r < 60:
-        return {
-            "symbol": symbol,
-            "type": "BUY",
-            "score": sc,
-            "confidence": conf,
-            "entry": price,
-            "sl": price * 0.97,
-            "tp": price * 1.05
-        }
-
-    if price < e and r > 40:
-        return {
-            "symbol": symbol,
-            "type": "SELL",
-            "score": sc,
-            "confidence": conf,
-            "entry": price,
-            "sl": price * 1.03,
-            "tp": price * 0.95
-        }
+    if price < ema_15:
+        return "SELL"
 
     return None
 
-# =========================
-# SCAN MARKET
-# =========================
+# =====================================================
+# SAFE LEVERAGE ENGINE
+# =====================================================
+def leverage_and_risk(volatility, symbol):
+
+    leverage = "5x"
+    risk = "MEDIUM"
+
+    majors = [
+        "BTCUSDT",
+        "ETHUSDT",
+        "BNBUSDT",
+        "SOLUSDT"
+    ]
+
+    # LOW VOLATILITY
+    if volatility < 1:
+
+        if symbol in majors:
+            leverage = "10x"
+            risk = "LOW"
+        else:
+            leverage = "7x"
+            risk = "LOW"
+
+    # MEDIUM
+    elif volatility < 3:
+        leverage = "5x"
+        risk = "MEDIUM"
+
+    # HIGH
+    else:
+        leverage = "3x"
+        risk = "HIGH"
+
+    return leverage, risk
+
+# =====================================================
+# SIGNAL ENGINE
+# =====================================================
+def analyze(symbol):
+
+    closes, volumes = get_klines(symbol, "5m", 120)
+
+    if len(closes) < 50:
+        return None
+
+    try:
+
+        # -------------------------------------------------
+        # MAIN VALUES
+        # -------------------------------------------------
+        price = closes[-1]
+
+        ema_fast = ema(closes, 20)
+        ema_slow = ema(closes, 50)
+
+        r = rsi(closes)
+        m = momentum(closes)
+        volatility = atr(closes)
+
+        volume_score = volume_strength(volumes)
+
+        trend = trend_confirmation(symbol)
+
+        # -------------------------------------------------
+        # BASE SCORE
+        # -------------------------------------------------
+        score = 50
+
+        # TREND
+        if ema_fast > ema_slow:
+            score += 20
+            direction = "BUY"
+        else:
+            score += 20
+            direction = "SELL"
+
+        # HIGHER TIMEFRAME CONFIRMATION
+        if trend == direction:
+            score += 20
+        else:
+            score -= 25
+
+        # RSI QUALITY
+        if direction == "BUY" and 45 < r < 68:
+            score += 12
+
+        elif direction == "SELL" and 32 < r < 55:
+            score += 12
+
+        else:
+            score -= 10
+
+        # MOMENTUM
+        if abs(m) > 0.7:
+            score += 15
+        else:
+            score -= 15
+
+        # VOLUME
+        if volume_score > 130:
+            score += 18
+
+        elif volume_score > 110:
+            score += 10
+
+        else:
+            score -= 10
+
+        # SIDEWAYS FILTER
+        if volatility < 0.15:
+            return None
+
+        # -------------------------------------------------
+        # FINAL FILTER
+        # -------------------------------------------------
+        confidence = max(0, min(100, score))
+
+        # ONLY ELITE SIGNALS
+        if confidence < 82:
+            return None
+
+        # -------------------------------------------------
+        # ATR STOP LOSS
+        # -------------------------------------------------
+        stop_distance = volatility * 1.8
+        target_distance = volatility * 3
+
+        if direction == "BUY":
+
+            sl = price - stop_distance
+            tp = price + target_distance
+
+        else:
+
+            sl = price + stop_distance
+            tp = price - target_distance
+
+        # -------------------------------------------------
+        # LEVERAGE
+        # -------------------------------------------------
+        lev, risk = leverage_and_risk(volatility, symbol)
+
+        # -------------------------------------------------
+        # GRADE
+        # -------------------------------------------------
+        if confidence >= 92:
+            grade = "A+"
+
+        elif confidence >= 88:
+            grade = "A"
+
+        else:
+            grade = "B+"
+
+        return {
+            "symbol": symbol,
+            "type": direction,
+            "confidence": confidence,
+            "grade": grade,
+            "risk": risk,
+            "leverage": lev,
+            "entry": price,
+            "sl": sl,
+            "tp": tp,
+            "volume": int(volume_score),
+            "momentum": round(m, 2),
+        }
+
+    except:
+        return None
+
+# =====================================================
+# MARKET SCANNER
+# =====================================================
 def scan_market():
+
     results = []
 
-    for sym in get_symbols():
-        t = trade(sym)
-        if t:
-            results.append(t)
+    symbols = get_symbols()
 
-    results.sort(key=lambda x: x["confidence"], reverse=True)
+    for symbol in symbols:
+
+        signal = analyze(symbol)
+
+        if signal:
+            results.append(signal)
+
+    # BEST FIRST
+    results.sort(
+        key=lambda x: (
+            x["confidence"],
+            x["volume"],
+            abs(x["momentum"])
+        ),
+        reverse=True
+    )
 
     return results[:10]
 
-# =========================
-# ALERT LOOP (BACKGROUND)
-# =========================
+# =====================================================
+# REAL TIME ALERT LOOP
+# =====================================================
 async def alert_loop(app):
+
+    global CHAT_ID
+
     while True:
-        data = scan_market()
 
-        for d in data:
-            if d["confidence"] < 80:
-                continue
+        try:
 
-            symbol = d["symbol"]
+            signals = scan_market()
 
-            if symbol in trade_history:
-                continue
+            for s in signals:
 
-            msg = f"""
-🚨 HIGH CONFIDENCE SIGNAL
+                symbol = s["symbol"]
 
-{symbol}
-Type: {d['type']}
-Confidence: {d['confidence']}%
-Score: {d['score']}
-Entry: {d['entry']:.4f}
-SL: {d['sl']:.4f}
-TP: {d['tp']:.4f}
-"""
+                # Avoid spam
+                if symbol in trade_history:
+                    continue
 
-            if CHAT_ID:
-                await app.bot.send_message(chat_id=CHAT_ID, text=msg)
+                msg = (
+                    f"🚨 ELITE FUTURES SIGNAL\n\n"
+                    f"#{signals.index(s)+1} {symbol}\n\n"
+                    f"Direction: {s['type']}\n"
+                    f"Grade: {s['grade']}\n"
+                    f"Confidence: {s['confidence']}%\n"
+                    f"Risk: {s['risk']}\n"
+                    f"Leverage: {s['leverage']}\n\n"
+                    f"Entry: {s['entry']:.6f}\n"
+                    f"SL: {s['sl']:.6f}\n"
+                    f"TP: {s['tp']:.6f}\n\n"
+                    f"Volume Strength: {s['volume']}%"
+                )
 
-            trade_history[symbol] = "PENDING"
+                if CHAT_ID:
+                    await app.bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=msg
+                    )
 
-        await asyncio.sleep(60)
+                trade_history[symbol] = True
 
-# =========================
-# HANDLER
-# =========================
+            await asyncio.sleep(120)
+
+        except:
+            await asyncio.sleep(30)
+
+# =====================================================
+# START COMMAND
+# =====================================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    global CHAT_ID
+
+    CHAT_ID = update.effective_chat.id
+
+    await update.message.reply_text(
+        "🚀 ELITE FUTURES AI BOT ONLINE\n"
+        "Top Ranked Institutional Signals",
+        reply_markup=menu()
+    )
+
+# =====================================================
+# MESSAGE HANDLER
+# =====================================================
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global win_count, loss_count
+
+    global win_count
+    global loss_count
 
     text = update.message.text.upper()
 
+    # =================================================
+    # TRADE
+    # =================================================
     if text == "TRADE":
-        data = scan_market()
 
-        msg = "🔥 TOP 10 HIGH CONFIDENCE SETUPS\n\n"
+        signals = scan_market()
 
-        for i, d in enumerate(data, 1):
-            msg += f"#{i} {d['symbol']} ({d['type']})\n"
-            msg += f"Conf: {d['confidence']}%\n"
-            msg += f"Entry: {d['entry']:.4f}\n\n"
+        if not signals:
+
+            await update.message.reply_text(
+                "❌ No elite setups found now."
+            )
+            return
+
+        msg = "🔥 TOP 10 ELITE FUTURES SETUPS\n\n"
+
+        for i, s in enumerate(signals, 1):
+
+            msg += (
+                f"#{i} {s['symbol']} ({s['type']})\n"
+                f"Grade: {s['grade']}\n"
+                f"Confidence: {s['confidence']}%\n"
+                f"Risk: {s['risk']}\n"
+                f"Leverage: {s['leverage']}\n"
+                f"Entry: {s['entry']:.6f}\n"
+                f"SL: {s['sl']:.6f}\n"
+                f"TP: {s['tp']:.6f}\n\n"
+            )
 
         await update.message.reply_text(msg)
         return
 
+    # =================================================
+    # WIN
+    # =================================================
     if text == "WIN":
+
         win_count += 1
-        await update.message.reply_text(f"✅ Win recorded | Wins: {win_count}")
+
+        total = win_count + loss_count
+
+        winrate = (
+            (win_count / total) * 100
+            if total > 0 else 0
+        )
+
+        await update.message.reply_text(
+            f"✅ WIN RECORDED\n\n"
+            f"Wins: {win_count}\n"
+            f"Losses: {loss_count}\n"
+            f"Win Rate: {winrate:.1f}%"
+        )
+
         return
 
+    # =================================================
+    # LOSS
+    # =================================================
     if text == "LOSS":
+
         loss_count += 1
-        await update.message.reply_text(f"❌ Loss recorded | Losses: {loss_count}")
+
+        total = win_count + loss_count
+
+        winrate = (
+            (win_count / total) * 100
+            if total > 0 else 0
+        )
+
+        await update.message.reply_text(
+            f"❌ LOSS RECORDED\n\n"
+            f"Wins: {win_count}\n"
+            f"Losses: {loss_count}\n"
+            f"Win Rate: {winrate:.1f}%"
+        )
+
         return
 
-# =========================
-# START COMMAND
-# =========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global CHAT_ID
-    CHAT_ID = update.message.chat_id
+    # =================================================
+    # AUTO
+    # =================================================
+    if text == "AUTO":
 
-    await update.message.reply_text(
-        "🚀 PRO TRADING BOT RUNNING ON CLOUD",
-        reply_markup=menu()
+        await update.message.reply_text(
+            "🤖 AUTO ELITE SIGNAL MODE ACTIVE"
+        )
+
+        return
+
+# =====================================================
+# MAIN
+# =====================================================
+async def main():
+
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(
+        CommandHandler("start", start)
     )
 
-# =========================
-# APP SETUP (FIXED RENDER VERSION)
-# =========================
-async def post_init(app):
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle
+        )
+    )
+
+    # START ALERT LOOP
     asyncio.create_task(alert_loop(app))
 
-app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+    print("🚀 Elite Futures Bot Running...")
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+    await app.run_polling()
 
-print("Bot Running on Cloud...")
-
-app.run_polling()
+# =====================================================
+# RUN
+# =====================================================
+if __name__ == "__main__":
+    asyncio.run(main())
