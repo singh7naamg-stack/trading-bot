@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-from engine import get_top_signals
+from engine import get_top_signals, AUTO_THRESHOLD, MANUAL_THRESHOLD, MAX_SIGNALS
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,8 +17,6 @@ load_dotenv()
 TOKEN            = os.getenv("BOT_TOKEN")
 SUBSCRIBERS_FILE = "subscribers.json"
 COOLDOWN_SECONDS = 120
-AUTO_THRESHOLD   = 75
-MANUAL_THRESHOLD = 60
 
 
 # ─── Subscriber Persistence ───────────────────────────────────────────────────
@@ -53,43 +51,58 @@ def fmt_price(p):
     return f"{p:.8f}"
 
 def format_signal(res, rank):
-    medal    = {0: "🥇", 1: "🥈", 2: "🥉"}.get(rank, "💎")
-    fr_str   = f"{res['funding_rate']:+.4f}%" if res.get("funding_rate") is not None else "N/A"
-    vol_str  = f"${res.get('vol_24h_m', '?')}M"
+    medal     = {0: "🥇", 1: "🥈", 2: "🥉"}.get(rank, "💎")
+    fr_str    = f"{res['funding_rate']:+.4f}%" if res.get("funding_rate") is not None else "N/A"
+    vol_str   = f"${res.get('vol_24h_m', '?')}M"
     news_icon = {"POSITIVE": "📰✅", "NEGATIVE": "📰❌"}.get(res.get("news", ""), "")
+    score     = res['score']
+
+    # Score quality label
+    if score >= 100:   quality = "🔥 ELITE"
+    elif score >= 90:  quality = "⚡ STRONG"
+    elif score >= 80:  quality = "✅ GOOD"
+    else:              quality = "📊 VALID"
 
     out = (
         f"{medal} *{res['symbol']}* {res['dir']} {news_icon}\n"
-        f"Entry  : `{fmt_price(res['entry'])}`\n"
-        f"TP     : `{fmt_price(res['tp'])}` | SL: `{fmt_price(res['sl'])}`\n"
-        f"Lev    : `{res['lev']}x` | R:R `1:{res['rr']}`\n"
-        f"Score  : `{res['score']}%` | RSI `{res['rsi']}` | ADX `{res['adx']}`\n"
-        f"FR     : `{fr_str}` | Vol: `{vol_str}`\n"
-        f"Reason : _{res['reasons'][:80]}_\n"
+        f"Quality : {quality} `({score}%)`\n"
+        f"Entry   : `{fmt_price(res['entry'])}`\n"
+        f"TP      : `{fmt_price(res['tp'])}` | SL: `{fmt_price(res['sl'])}`\n"
+        f"Lev     : `{res['lev']}x` | R:R `1:{res['rr']}`\n"
+        f"RSI     : `{res['rsi']}` | ADX: `{res['adx']}` | Vol: `{vol_str}`\n"
+        f"FR      : `{fr_str}`\n"
+        f"Reason  : _{res['reasons'][:90]}_\n"
     )
     if res.get("news_headline"):
-        out += f"News   : _{res['news_headline'][:70]}_\n"
+        out += f"News    : _{res['news_headline'][:70]}_\n"
     out += "─" * 28 + "\n\n"
     return out
 
 def build_report(results, ctx, is_auto, threshold):
-    header = "🚨 *HIGH-QUALITY AUTO-ALERT*" if is_auto else "🚀 *BINANCE LIVE SIGNALS*"
+    header = "🚨 *HIGH-QUALITY AUTO-ALERT*" if is_auto else "🚀 *BINANCE SIGNALS — STRICT MODE*"
     ts     = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    body   = f"{header}  `{ts}`\n"
+
+    body = f"{header}  `{ts}`\n"
 
     if ctx:
         btc_icon = "🟢" if ctx.btc_is_bullish() else ("🔴" if ctx.btc_is_bearish() else "⚪")
         body += (
-            f"\n"
-            f"BTC: {btc_icon} `{ctx.btc_trend_4h}` | F&G: `{ctx.fear_greed}` {ctx.fear_greed_label}\n"
+            f"BTC: {btc_icon} `{ctx.btc_trend_4h}` | "
+            f"F&G: `{ctx.fear_greed}` {ctx.fear_greed_label} | "
+            f"L/S: `{ctx.ls_ratio:.2f}`\n"
         )
         if ctx.macro_event_today:
             body += f"🚨 *MACRO: {ctx.macro_event_name}* - reduce size!\n"
 
     body += f"\n*{len(results)} signal(s) — score >= {threshold}%*\n\n"
+
     for i, r in enumerate(results):
         body += format_signal(r, i)
-    body += "_Signals are educational only. Always manage your own risk._"
+
+    body += (
+        f"_Strict mode: passed 6 hard filters + 10-pillar scoring._\n"
+        f"_Max {MAX_SIGNALS} signals per scan. Educational only._"
+    )
     return body
 
 
@@ -99,14 +112,24 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
     global last_ctx
     try:
         results, ctx = await get_top_signals()
-        last_ctx = ctx
-        filtered = [s for s in results if s["score"] >= threshold]
+        last_ctx     = ctx
+        filtered     = [s for s in results if s["score"] >= threshold]
 
         if not filtered:
             if not is_auto:
+                # Tell user WHY there are no signals — not just silence
+                btc_str  = f"BTC is currently {ctx.btc_trend_4h}" if ctx else ""
+                macro_str = f"\n\nMacro event today: {ctx.macro_event_name}" if ctx and ctx.macro_event_today else ""
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="📉 No signals meet criteria right now. Market may be ranging — patience is key."
+                    text=(
+                        f"📭 *No signals passed strict criteria right now.*\n\n"
+                        f"{btc_str}{macro_str}\n\n"
+                        f"This is normal. The bot found no setups meeting the {threshold}% threshold "
+                        f"after passing all 6 hard filters and 10-pillar scoring.\n\n"
+                        f"_Waiting for a real setup is the right move._"
+                    ),
+                    parse_mode="Markdown"
                 )
             return
 
@@ -116,20 +139,20 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
             try:
                 await bot.send_message(chat_id=chat_id, text=report, parse_mode="Markdown")
             except Exception:
-                await bot.send_message(chat_id=chat_id, text=report.replace("*", "").replace("`", "").replace("_", ""))
+                await bot.send_message(chat_id=chat_id, text=report.replace("*","").replace("`","").replace("_",""))
         else:
-            for chunk in [filtered[i:i+3] for i in range(0, len(filtered), 3)]:
+            for chunk in [filtered[i:i+2] for i in range(0, len(filtered), 2)]:
                 msg = build_report(chunk, None, is_auto=is_auto, threshold=threshold)
                 try:
                     await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
                 except Exception:
-                    await bot.send_message(chat_id=chat_id, text=msg.replace("*", "").replace("`", "").replace("_", ""))
+                    await bot.send_message(chat_id=chat_id, text=msg.replace("*","").replace("`","").replace("_",""))
                 await asyncio.sleep(0.5)
 
     except Exception as e:
-        logger.error(f"scan_and_send error [{chat_id}]: {e}", exc_info=True)
+        logger.error(f"scan_and_send [{chat_id}]: {e}", exc_info=True)
         if not is_auto:
-            await bot.send_message(chat_id=chat_id, text="⚠️ Scan error. Please try again in a moment.")
+            await bot.send_message(chat_id=chat_id, text="⚠️ Scan error. Please try again.")
 
 
 # ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -139,21 +162,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribers.add(chat_id)
     save_subscribers(subscribers)
     await update.message.reply_text(
-        "🚀 *QuestLife Signal Bot v4.0 — Active*\n\n"
-        "📡 *Intelligence layers:*\n"
-        "• BTC 4H trend gate (bears block all LONG signals)\n"
-        "• FOMC/CPI/NFP macro event detection\n"
-        "• Crypto news sentiment (CryptoPanic)\n"
-        "• Funding rates + Open Interest + L/S ratio\n"
-        "• Fear & Greed + BTC dominance\n"
-        "• 8-pillar scoring (120pts max)\n\n"
+        "🚀 *QuestLife Signal Bot v5.0 — STRICT MODE*\n\n"
+        "📡 *What makes this strict:*\n"
+        "• 6 hard filters — coin rejected instantly if any fail\n"
+        "• 10-pillar scoring — EMA, RSI, ADX, Volume, Funding,\n"
+        "  OI, L/S Ratio, F&G, Support/Resistance, Candle Pattern\n"
+        "• Max 5 signals per scan — only the best\n"
+        "• Auto alerts only at score >= 85%\n"
+        "• Manual scan only at score >= 75%\n"
+        "• No 4H confirmation = rejected entirely\n"
+        "• ADX < 22 = ranging market = rejected\n"
+        "• Chasing entries (RSI > 68) = rejected\n\n"
         "📋 *Commands:*\n"
-        "/signals — Manual scan (score >= 60%)\n"
-        "/top — Single best signal now\n"
-        "/briefing — Full market context report\n"
+        "/signals — Manual scan (>= 75%)\n"
+        "/top — Best single signal now\n"
+        "/briefing — Full market context\n"
         "/status — Bot health\n"
         "/stop — Unsubscribe\n\n"
-        "⚠️ _Educational only. Not financial advice._",
+        "⚠️ _If bot sends nothing — that IS the signal. No setup = no trade._",
         parse_mode="Markdown"
     )
 
@@ -166,7 +192,7 @@ async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⏳ Please wait {wait}s before scanning again.")
         return
     last_scan_time[chat_id] = now
-    msg = await update.message.reply_text("🔎 Running 8-pillar market-aware analysis...")
+    msg = await update.message.reply_text("🔎 Running strict 10-pillar scan across top 40 pairs...")
     await scan_and_send(context.bot, chat_id, threshold=MANUAL_THRESHOLD)
     try:
         await msg.delete()
@@ -175,21 +201,33 @@ async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("🏆 Finding best signal right now...")
+    msg = await update.message.reply_text("🏆 Finding the single best signal...")
     try:
         results, ctx = await get_top_signals()
         if not results:
-            await update.message.reply_text("📉 No qualifying signals right now. Try again later.")
+            await update.message.reply_text(
+                "📭 *No signal passed strict criteria right now.*\n\n"
+                "_This means the market has no high-conviction setup at this moment. "
+                "That is a valid outcome — not every scan produces a signal._",
+                parse_mode="Markdown"
+            )
         else:
             best   = results[0]
-            report = "🏆 *TOP SIGNAL RIGHT NOW*\n\n" + format_signal(best, 0)
+            report = "🏆 *BEST SIGNAL RIGHT NOW*\n\n" + format_signal(best, 0)
             try:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=report, parse_mode="Markdown")
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=report,
+                    parse_mode="Markdown"
+                )
             except Exception:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=report.replace("*", "").replace("`", "").replace("_", ""))
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=report.replace("*","").replace("`","").replace("_","")
+                )
     except Exception as e:
         logger.error(f"/top error: {e}", exc_info=True)
-        await update.message.reply_text("⚠️ Error fetching top signal. Try again.")
+        await update.message.reply_text("⚠️ Error. Try again in a moment.")
     finally:
         try:
             await msg.delete()
@@ -201,7 +239,6 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_ctx
     msg = await update.message.reply_text("📊 Fetching market intelligence...")
     try:
-        # Build fresh context if no scan has run yet
         if last_ctx is None:
             import ccxt.async_support as ccxt_lib
             from market_intel import build_market_context
@@ -217,12 +254,10 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         ctx = last_ctx
 
-        # Safe value strings — no special chars that break Markdown
         btc_icon   = "🟢" if ctx.btc_is_bullish() else ("🔴" if ctx.btc_is_bearish() else "⚪")
         daily_icon = "🟢" if ctx.btc_trend_daily == "BULL" else ("🔴" if ctx.btc_trend_daily == "BEAR" else "⚪")
         fg_icon    = "😱" if ctx.is_extreme_fear() else ("🤑" if ctx.is_extreme_greed() else "😐")
 
-        # Format numbers as plain strings — no +/- signs outside code blocks
         price_str  = f"${ctx.btc_price:,.0f}" if ctx.btc_price else "N/A"
         change_val = ctx.btc_change_24h or 0
         change_str = f"up {change_val:.1f}pct" if change_val >= 0 else f"down {abs(change_val):.1f}pct"
@@ -232,19 +267,17 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dom_str    = f"{ctx.btc_dominance:.1f}pct" if ctx.btc_dominance else "N/A"
         fg_bar     = "█" * (ctx.fear_greed // 10) + "░" * (10 - ctx.fear_greed // 10)
 
-        # Trading verdict — plain text, no special chars
         if ctx.btc_is_bearish():
-            verdict = "🔴 BTC 4H bearish — all altcoin LONGs blocked by bot"
+            verdict = "🔴 BTC 4H bearish — all altcoin LONGs blocked"
         elif ctx.btc_is_bullish() and ctx.fear_greed < 50:
-            verdict = "🟢 BTC bullish + Fear = good LONG environment"
+            verdict = "🟢 BTC bullish + Fear = strong LONG environment"
         elif ctx.is_extreme_greed():
-            verdict = "⚠️ Extreme Greed — LONGs are risky, consider reducing size"
+            verdict = "⚠️ Extreme Greed — LONGs risky, reduce size"
         elif ctx.is_extreme_fear():
-            verdict = "💡 Extreme Fear — historically good LONG accumulation zone"
+            verdict = "💡 Extreme Fear — good LONG accumulation zone"
         else:
-            verdict = "⚪ Neutral conditions — follow individual signal scores"
+            verdict = "⚪ Neutral — follow individual signal scores"
 
-        # Build report using only safe Markdown (* and `)
         report = (
             "📊 *MARKET INTELLIGENCE BRIEFING*\n"
             f"_{ctx.fetched_at}_\n\n"
@@ -273,24 +306,21 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         report += f"*Verdict:* {verdict}"
 
-        # Send as plain Markdown
         try:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=report,
                 parse_mode="Markdown"
             )
-        except Exception as md_err:
-            logger.warning(f"Markdown send failed, sending plain: {md_err}")
-            # Ultimate fallback — strip all markdown
-            plain = report.replace("*", "").replace("`", "").replace("_", "")
+        except Exception:
+            plain = report.replace("*","").replace("`","").replace("_","")
             await context.bot.send_message(chat_id=update.effective_chat.id, text=plain)
 
     except Exception as e:
         logger.error(f"/briefing error: {e}", exc_info=True)
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="⚠️ Briefing failed. Run /signals first to warm up market data, then try /briefing again."
+            text="⚠️ Briefing failed. Run /signals first then try /briefing again."
         )
     finally:
         try:
@@ -309,16 +339,18 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     btc_str  = f"${last_ctx.btc_price:,.0f} ({last_ctx.btc_trend_4h})" if last_ctx else "Run /signals first"
     news_str = "Active" if os.getenv("CRYPTOPANIC_TOKEN") else "Add CRYPTOPANIC_TOKEN to enable"
     await update.message.reply_text(
-        "✅ *Bot Status: Online*\n\n"
-        f"Subscribers     : `{len(subscribers)}`\n"
-        f"Auto-scan       : every `15 min`\n"
-        f"Auto threshold  : `{AUTO_THRESHOLD}%`\n"
-        f"Manual threshold: `{MANUAL_THRESHOLD}%`\n"
-        f"Timeframes      : `1H + 4H`\n"
-        f"BTC last seen   : `{btc_str}`\n"
-        f"Pairs scanned   : Top `40` by 24H volume\n"
-        f"Pillars         : `8` (120pts max)\n"
-        f"News intel      : `{news_str}`",
+        "✅ *Bot Status: Online — v5.0 STRICT*\n\n"
+        f"Subscribers      : `{len(subscribers)}`\n"
+        f"Auto-scan        : every `15 min`\n"
+        f"Auto threshold   : `{AUTO_THRESHOLD}%`\n"
+        f"Manual threshold : `{MANUAL_THRESHOLD}%`\n"
+        f"Max signals      : `{MAX_SIGNALS}` per scan\n"
+        f"Min volume       : `$10M` 24H\n"
+        f"Timeframes       : `1H + 4H`\n"
+        f"Hard filters     : `6`\n"
+        f"Scoring pillars  : `10` (130pts max)\n"
+        f"BTC last seen    : `{btc_str}`\n"
+        f"News intel       : `{news_str}`",
         parse_mode="Markdown"
     )
 
@@ -347,7 +379,7 @@ def main():
     app.add_handler(CommandHandler("stop",     stop))
     app.add_handler(CommandHandler("status",   status))
     app.job_queue.run_repeating(auto_scan_job, interval=900, first=30)
-    logger.info(f"QuestLife Bot v4.0 Online | {len(subscribers)} subscriber(s)")
+    logger.info(f"QuestLife Bot v5.0 STRICT Online | {len(subscribers)} subscriber(s)")
     app.run_polling(drop_pending_updates=True)
 
 
