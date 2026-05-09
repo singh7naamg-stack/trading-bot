@@ -192,9 +192,7 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    NEW: Full market intelligence report — no signals, just the market picture.
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Shows BTC trend, Fear & Greed, dominance, macro events, L/S ratio, OI.
     """
     global last_ctx
