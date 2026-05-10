@@ -803,7 +803,7 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
         btc_icon   = "🟢" if ctx.btc_is_bullish() else ("🔴" if ctx.btc_is_bearish() else "⚪")
         daily_icon = "🟢" if ctx.btc_trend_daily == "BULL" else ("🔴" if ctx.btc_trend_daily == "BEAR" else "⚪")
         fg_icon    = "😱" if ctx.is_extreme_fear() else ("🤑" if ctx.is_extreme_greed() else "😐")
-        price_str  = f"${ctx.btc_price:,.0f}" if ctx.btc_price else "N/A"
+        price_str = f"${ctx.btc_price:,.0f}" if ctx.btc_price and ctx.btc_price > 0 else "fetching..."
         change_val = ctx.btc_change_24h or 0
         change_str = f"up {change_val:.1f}pct" if change_val >= 0 else f"down {abs(change_val):.1f}pct"
         fg_bar     = "█" * (ctx.fear_greed // 10) + "░" * (10 - ctx.fear_greed // 10)
