@@ -1,11 +1,13 @@
 # ============================================================
-#  QuestLife Signal Bot — engine.py  v5.0 STRICT MODE FINAL
-#  13-Pillar | 6 Hard Filters | Max 5 Signals | TP1/TP2/TP3
+#  QuestLife Signal Bot — engine.py  v5.0 STRICT FINAL
+#  13-Pillar | 6 Hard Filters | Ban Detection | Max 5 Signals
 # ============================================================
 
 import asyncio
 import logging
 import os
+import re
+import time
 
 import pandas as pd
 import ccxt.async_support as ccxt
@@ -28,6 +30,45 @@ AUTO_THRESHOLD      = 85
 MAX_SIGNALS         = 5
 MAX_LONGS           = 3
 MAX_SHORTS          = 2
+
+# ─── Ban Detection ────────────────────────────────────────────────────────────
+BAN_FILE = "/data/ban_until.txt"
+
+def is_banned() -> bool:
+    """Check if Binance IP ban is currently active."""
+    if not os.path.exists(BAN_FILE):
+        return False
+    try:
+        with open(BAN_FILE) as f:
+            ban_ts = float(f.read().strip())
+        if time.time() < ban_ts:
+            return True
+        else:
+            os.remove(BAN_FILE)  # Ban expired, clean up
+            return False
+    except Exception:
+        return False
+
+def get_ban_remaining_mins() -> int:
+    """Return minutes remaining on ban."""
+    try:
+        with open(BAN_FILE) as f:
+            ban_ts = float(f.read().strip())
+        return max(0, int((ban_ts - time.time()) / 60))
+    except Exception:
+        return 0
+
+def save_ban(banned_until_ms: int):
+    """Save ban expiry timestamp to disk — survives restarts."""
+    try:
+        os.makedirs("/data", exist_ok=True)
+        ban_ts  = banned_until_ms / 1000
+        mins    = int((ban_ts - time.time()) / 60)
+        with open(BAN_FILE, "w") as f:
+            f.write(str(ban_ts))
+        logger.error(f"Binance 418 ban saved — expires in {mins} minutes. All scans paused automatically.")
+    except Exception as e:
+        logger.error(f"Could not save ban file: {e}")
 
 
 # ─── OHLCV ────────────────────────────────────────────────────────────────────
@@ -100,18 +141,18 @@ def check_sr(entry, tp, sl, direction, res, sup):
         blockers = [r for r in res if entry * 1.005 < r < tp]
         if blockers:
             bp = (min(blockers) - entry) / (tp - entry + 1e-10)
-            if bp < 0.4:  return -15, f"HardBlock@{min(blockers):.4g}"
-            elif bp < 0.7:return -8,  f"SoftBlock@{min(blockers):.4g}"
-            else:         return -3,  f"FarBlock@{min(blockers):.4g}"
+            if bp < 0.4:   return -15, f"HardBlock@{min(blockers):.4g}"
+            elif bp < 0.7: return -8,  f"SoftBlock@{min(blockers):.4g}"
+            else:          return -3,  f"FarBlock@{min(blockers):.4g}"
         if any(abs(entry - s) / entry < tol for s in sup): return 10, "AtSupport"
         return 5, "PathClear"
     else:
         blockers = [s for s in sup if tp < s < entry * 0.995]
         if blockers:
             bp = (entry - max(blockers)) / (entry - tp + 1e-10)
-            if bp < 0.4:  return -15, f"HardBlock@{max(blockers):.4g}"
-            elif bp < 0.7:return -8,  f"SoftBlock@{max(blockers):.4g}"
-            else:         return -3,  f"FarBlock@{max(blockers):.4g}"
+            if bp < 0.4:   return -15, f"HardBlock@{max(blockers):.4g}"
+            elif bp < 0.7: return -8,  f"SoftBlock@{max(blockers):.4g}"
+            else:          return -3,  f"FarBlock@{max(blockers):.4g}"
         if any(abs(entry - r) / entry < tol for r in res): return 10, "AtResistance"
         return 5, "PathClear"
 
@@ -180,8 +221,8 @@ def detect_candle(df, direction):
 
 def check_bb_squeeze(df, direction):
     if len(df) < 30: return 0, ""
-    last  = df.iloc[-1]
-    bw    = last["BB_WIDTH"]
+    last = df.iloc[-1]
+    bw   = last["BB_WIDTH"]
     if pd.isna(bw): return 0, ""
     bwmin = df["BB_WIDTH"].tail(50).min()
     bwmax = df["BB_WIDTH"].tail(50).max()
@@ -295,7 +336,7 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
     # Pillar 2: EMA 200 (10pts)
     ema200 = last["EMA_200"]
     if pd.notna(ema200):
-        if direction == "LONG"  and entry > ema200: score += 10; reasons.append("AboveEMA200")
+        if direction == "LONG"  and entry > ema200:  score += 10; reasons.append("AboveEMA200")
         elif direction == "SHORT" and entry < ema200: score += 10; reasons.append("BelowEMA200")
         elif direction == "LONG"  and entry < ema200: score -= 5;  reasons.append("BelowEMA200!")
         elif direction == "SHORT" and entry > ema200: score -= 5;  reasons.append("AboveEMA200!")
@@ -387,12 +428,12 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
 
     # Pillar 10: News (8pts)
     news = ctx.news_sentiment.get(coin, "NEUTRAL")
-    if news == "POSITIVE" and direction == "LONG":   score += 8; reasons.append("News+")
-    elif news == "POSITIVE" and direction == "SHORT": score -= 5
+    if news == "POSITIVE" and direction == "LONG":    score += 8; reasons.append("News+")
+    elif news == "POSITIVE" and direction == "SHORT":  score -= 5
     elif news == "NEGATIVE" and direction == "LONG":
         score -= 10; reasons.append("News-!")
         if score < 55: return None
-    elif news == "NEGATIVE" and direction == "SHORT": score += 8; reasons.append("News-Short")
+    elif news == "NEGATIVE" and direction == "SHORT":  score += 8; reasons.append("News-Short")
 
     # Macro penalty
     if ctx.macro_event_today:
@@ -406,19 +447,19 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
 
     # TP/SL
     if direction == "LONG":
-        sl   = entry - atr * 1.5; icon = "🟢"
+        sl = entry - atr * 1.5; icon = "🟢"
     else:
-        sl   = entry + atr * 1.5; icon = "🔴"
+        sl = entry + atr * 1.5; icon = "🔴"
 
     if abs(sl - entry) < entry * 0.0001: return None
 
     tp_main = entry + atr * 3.0 if direction == "LONG" else entry - atr * 3.0
 
     # Pillar 11: S/R + Fibonacci (10pts)
-    res, sup        = find_sr_levels(df_1h)
-    fibs            = get_fib_levels(df_1h)
-    sr_pts, sr_r    = check_sr(entry, tp_main, sl, direction, res, sup)
-    fib_pts, fib_r  = check_fib(entry, fibs, direction)
+    res, sup       = find_sr_levels(df_1h)
+    fibs           = get_fib_levels(df_1h)
+    sr_pts, sr_r   = check_sr(entry, tp_main, sl, direction, res, sup)
+    fib_pts, fib_r = check_fib(entry, fibs, direction)
     score += sr_pts + min(fib_pts, 10)
     if sr_r:  reasons.append(sr_r)
     if fib_r: reasons.append(fib_r)
@@ -432,12 +473,9 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
     if score < MANUAL_THRESHOLD: return None
 
     tp1, tp2, tp3 = calc_tps(entry, atr, direction, res, sup)
-
     sl_pct = abs(entry - sl) / entry
     lev    = min(20, max(1, round(0.02 / sl_pct))) if sl_pct > 0 else 1
     rr     = round(abs(tp2 - entry) / abs(sl - entry), 2)
-
-    # Estimated liquidation zone (where retail 10-15x gets hunted)
     liq_est = entry * 0.92 if direction == "LONG" else entry * 1.08
 
     return {
@@ -467,8 +505,24 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
 # ─── Main Entry Point ─────────────────────────────────────────────────────────
 
 async def get_top_signals():
+    """
+    Full pipeline with ban detection.
+    Returns (signals, context).
+    If banned: returns ([], empty_context) immediately without hitting Binance.
+    """
+
+    # ── Ban check FIRST — before any Binance call ─────────────────────────
+    if is_banned():
+        mins = get_ban_remaining_mins()
+        logger.warning(f"Binance ban active — {mins}min remaining. Skipping scan.")
+        return [], MarketContext()
+
     token    = os.getenv("CRYPTOPANIC_TOKEN", "")
-    exchange = ccxt.binance({"options": {"defaultType":"future"}, "enableRateLimit":True})
+    exchange = ccxt.binance({
+        "options"        : {"defaultType": "future"},
+        "enableRateLimit": True,
+    })
+
     try:
         markets     = await exchange.load_markets()
         all_futures = [s for s in markets if s.endswith("/USDT:USDT")]
@@ -480,7 +534,7 @@ async def get_top_signals():
             tickers = {}
 
         liquid      = [s for s in tickers if (tickers[s].get("quoteVolume") or 0) >= MIN_24H_VOLUME_USDT]
-        sorted_syms = sorted(liquid, key=lambda s: tickers[s].get("quoteVolume") or 0, reverse=True)[:20]
+        sorted_syms = sorted(liquid, key=lambda s: tickers[s].get("quoteVolume") or 0, reverse=True)[:25]
         logger.info(f"Scanning {len(sorted_syms)} pairs | Top5: {[s.replace('/USDT:USDT','') for s in sorted_syms[:5]]}")
 
         funding_map = {}
@@ -495,15 +549,35 @@ async def get_top_signals():
 
         raw = []
         for sym in sorted_syms:
-            r = await analyze_symbol(exchange, sym, tickers.get(sym,{}), funding_map.get(sym), ctx)
+            r = await analyze_symbol(
+                exchange, sym,
+                tickers.get(sym, {}),
+                funding_map.get(sym),
+                ctx
+            )
             if r:
                 raw.append(r)
                 logger.info(f"PASS {r['symbol']:15s} {r['dir']} Score:{r['score']} | {r['reasons'][:55]}")
-            await asyncio.sleep(1.5)  # Binance 418 protection
+            await asyncio.sleep(0.8)  # Binance 418 protection
 
         raw.sort(key=lambda x: x["score"], reverse=True)
         final = filter_correlated(raw)
         logger.info(f"Done. Raw:{len(raw)} Final:{len(final)}")
         return final, ctx
+
+    except Exception as e:
+        err = str(e)
+        # ── Detect and save ban ───────────────────────────────────────────
+        if "418" in err or "banned until" in err.lower():
+            match = re.search(r"banned until (\d+)", err)
+            if match:
+                save_ban(int(match.group(1)))
+            else:
+                # No timestamp found — set 2 hour default ban
+                save_ban(int((time.time() + 7200) * 1000))
+        else:
+            logger.error(f"get_top_signals error: {e}", exc_info=True)
+        return [], MarketContext()
+
     finally:
         await exchange.close()
