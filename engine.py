@@ -499,7 +499,7 @@ async def get_top_signals():
             if r:
                 raw.append(r)
                 logger.info(f"PASS {r['symbol']:15s} {r['dir']} Score:{r['score']} | {r['reasons'][:55]}")
-            await asyncio.sleep(0.8)  # Binance 418 protection
+            await asyncio.sleep(1.5)  # Binance 418 protection
 
         raw.sort(key=lambda x: x["score"], reverse=True)
         final = filter_correlated(raw)
