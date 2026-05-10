@@ -246,15 +246,19 @@ def save_user_trades(chat_id, trades):
 
 
 async def fetch_current_price(symbol):
-    """Fetch live price for a symbol from Binance futures."""
+    """
+    Fetch live price using Binance REST directly — no ccxt overhead.
+    Single lightweight call, no connection setup/teardown.
+    """
     try:
-        import ccxt.async_support as ccxt_lib
-        exchange = ccxt_lib.binance({"options":{"defaultType":"future"},"enableRateLimit":True})
-        try:
-            ticker = await exchange.fetch_ticker(f"{symbol}/USDT:USDT")
-            return ticker.get("last") or ticker.get("close")
-        finally:
-            await exchange.close()
+        import aiohttp
+        url    = "https://fapi.binance.com/fapi/v1/ticker/price"
+        params = {"symbol": f"{symbol}USDT"}
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
+            async with s.get(url, params=params) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    return float(data["price"])
     except Exception as e:
         logger.warning(f"Price fetch failed for {symbol}: {e}")
         return None
