@@ -21,9 +21,9 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 TOKEN            = os.getenv("BOT_TOKEN")
-SUBSCRIBERS_FILE = "subscribers.json"
-BALANCES_FILE    = "balances.json"
-TRADES_FILE      = "trades.json"
+SUBSCRIBERS_FILE = "/data/subscribers.json"
+BALANCES_FILE    = "/data/balances.json"
+TRADES_FILE      = "/data/trades.json"
 COOLDOWN_SECONDS = 120
 
 # ─── Persistence ──────────────────────────────────────────────────────────────
