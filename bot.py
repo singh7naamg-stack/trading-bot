@@ -167,6 +167,24 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
     global last_ctx
     try:
         results, ctx = await get_top_signals()
+        
+        # Inform user if ban is active
+        from engine import is_banned, get_ban_remaining_mins
+        if is_banned():
+            if not is_auto:
+                mins = get_ban_remaining_mins()
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"⏸ *Binance API temporarily rate-limited*\n\n"
+                        f"Auto-resumes in approximately `{mins} minutes`.\n"
+                        f"No action needed — bot will recover automatically.\n\n"
+                        f"_This happens when too many requests are made. "
+                        f"Now self-managed with ban detection._"
+                    ),
+                    parse_mode="Markdown"
+                )
+            return
         last_ctx     = ctx
         filtered     = [s for s in results if s["score"] >= threshold]
 
