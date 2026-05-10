@@ -480,7 +480,7 @@ async def get_top_signals():
             tickers = {}
 
         liquid      = [s for s in tickers if (tickers[s].get("quoteVolume") or 0) >= MIN_24H_VOLUME_USDT]
-        sorted_syms = sorted(liquid, key=lambda s: tickers[s].get("quoteVolume") or 0, reverse=True)[:25]
+        sorted_syms = sorted(liquid, key=lambda s: tickers[s].get("quoteVolume") or 0, reverse=True)[:20]
         logger.info(f"Scanning {len(sorted_syms)} pairs | Top5: {[s.replace('/USDT:USDT','') for s in sorted_syms[:5]]}")
 
         funding_map = {}
