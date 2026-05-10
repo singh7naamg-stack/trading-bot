@@ -936,7 +936,7 @@ def main():
     app.add_handler(CallbackQueryHandler(learn_callback, pattern="^learn_"))
 
     # Opportunity-only scan every 20 min (no alert if nothing qualifies)
-    app.job_queue.run_repeating(opportunity_scan_job, interval=1200, first=60)
+    app.job_queue.run_repeating(opportunity_scan_job, interval=3600, first=300)
 
     # Trade monitor every 5 min
     app.job_queue.run_repeating(trade_monitor_job, interval=300, first=30)
