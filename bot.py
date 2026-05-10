@@ -861,7 +861,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Your balance     : `{bal_str}`\n"
         f"Active trades    : `{len(trades)}` being monitored\n"
         f"Subscribers      : `{len(subscribers)}`\n"
-        f"Signal scan      : every `20 min` (opportunity-only alerts)\n"
+        f"Signal scan      : every `1 hour` (opportunity-only alerts)\n"
         f"Trade monitor    : every `5 min`\n"
         f"Auto threshold   : `{AUTO_THRESHOLD}%`\n"
         f"Manual threshold : `{MANUAL_THRESHOLD}%`\n"
