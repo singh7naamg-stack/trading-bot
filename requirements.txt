@@ -1,5 +1,7 @@
-python-telegram-bot[job-queue]==21.1.1
-ccxt==4.2.82
-pandas==2.2.2
-python-dotenv==1.0.1
-ta==0.11.0
+python-telegram-bot[job-queue]
+ccxt
+pandas
+numpy
+ta
+python-dotenv
+aiohttp
