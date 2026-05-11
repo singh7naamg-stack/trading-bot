@@ -26,6 +26,7 @@ BALANCES_FILE    = "/data/balances.json"
 TRADES_FILE      = "/data/trades.json"
 COOLDOWN_SECONDS = 120
 
+
 # ─── Persistence ──────────────────────────────────────────────────────────────
 
 def load_json(path, default):
@@ -39,6 +40,7 @@ def load_json(path, default):
 
 def save_json(path, data):
     try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
@@ -46,10 +48,9 @@ def save_json(path, data):
 
 subscribers    = set(load_json(SUBSCRIBERS_FILE, []))
 balances       = load_json(BALANCES_FILE, {})
-open_trades    = load_json(TRADES_FILE, {})   # {chat_id: [trade, trade, ...]}
+open_trades    = load_json(TRADES_FILE, {})
 last_scan_time = {}
 last_ctx       = None
-last_signal_scores = {}  # track last score per symbol to avoid repeat alerts
 
 
 # ─── Price Formatter ──────────────────────────────────────────────────────────
@@ -75,11 +76,11 @@ def calc_position(balance_usdt, sl_pct, lev):
 # ─── Signal Formatter ─────────────────────────────────────────────────────────
 
 def fmt_signal(res, rank, balance=None):
-    medal   = {0:"🥇",1:"🥈",2:"🥉"}.get(rank,"💎")
-    score   = res["score"]
-    fr_str  = f"{res['funding_rate']:+.4f}%" if res.get("funding_rate") is not None else "N/A"
-    quality = "🔥 ELITE" if score>=110 else ("⚡ STRONG" if score>=95 else ("✅ GOOD" if score>=85 else "📊 VALID"))
-    news_ic = {"POSITIVE":"📰✅","NEGATIVE":"📰❌"}.get(res.get("news",""),"")
+    medal    = {0:"🥇",1:"🥈",2:"🥉"}.get(rank,"💎")
+    score    = res["score"]
+    fr_str   = f"{res['funding_rate']:+.4f}%" if res.get("funding_rate") is not None else "N/A"
+    quality  = "🔥 ELITE" if score>=110 else ("⚡ STRONG" if score>=95 else ("✅ GOOD" if score>=85 else "📊 VALID"))
+    news_ic  = {"POSITIVE":"📰✅","NEGATIVE":"📰❌"}.get(res.get("news",""),"")
 
     out = (
         f"{medal} *{res['symbol']}* {res['dir']} {news_ic}\n"
@@ -107,10 +108,7 @@ def fmt_signal(res, rank, balance=None):
         out += f"News    : _{res['news_headline'][:65]}_\n"
 
     out += f"Reason  : _{res['reasons'][:85]}_\n"
-
-    # Quick add trade button
-    direction = "LONG" if "LONG" in res["dir"] else "SHORT"
-    out += f"\n_Reply /addtrade {res['symbol'].replace('/USDT','')} {direction} {fmt(res['entry'])} {fmt(res['tp2'])} {fmt(res['sl'])} to monitor this trade_"
+    out += f"\n_Reply /addtrade {res['symbol'].replace('/USDT','')} {'LONG' if 'LONG' in res['dir'] else 'SHORT'} {fmt(res['entry'])} {fmt(res['tp2'])} {fmt(res['sl'])} to monitor_"
     out += "\n" + "─" * 30 + "\n\n"
     return out
 
@@ -137,17 +135,16 @@ def fmt_guide(res):
         f"TP3 `{fmt(res['tp3'])}` → close remaining 20%\n\n"
         f"*Step 6 — After TP1 hits*\n"
         f"Move your SL to entry `{fmt(res['entry'])}` → trade is now risk-free\n\n"
-        f"*If SL hits:* Accept the loss, close the trade.\n"
-        f"Do not add more money. The bot will find the next setup.\n\n"
-        f"*To let the bot monitor this trade:*\n"
+        f"*If SL hits:* Accept the loss. Do not add more money.\n"
+        f"The bot will find the next setup.\n\n"
+        f"*To monitor this trade:*\n"
         f"`/addtrade {res['symbol'].replace('/USDT','')} {'LONG' if 'LONG' in res['dir'] else 'SHORT'} {fmt(res['entry'])} {fmt(res['tp2'])} {fmt(res['sl'])}`"
     )
 
 
-def build_header(results, ctx, is_auto, threshold):
-    header = "🚨 *HIGH CONVICTION SIGNAL FOUND*" if is_auto else "🚀 *STRICT SIGNALS — PROFESSIONAL SCAN*"
-    ts     = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    body   = f"{header}  `{ts}`\n"
+def build_header(results, ctx, threshold):
+    ts   = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    body = f"🚀 *STRICT SIGNALS — PROFESSIONAL SCAN*  `{ts}`\n"
     if ctx:
         btc_icon = "🟢" if ctx.btc_is_bullish() else ("🔴" if ctx.btc_is_bearish() else "⚪")
         body += (
@@ -161,14 +158,14 @@ def build_header(results, ctx, is_auto, threshold):
     return body
 
 
-# ─── Scan & Send ──────────────────────────────────────────────────────────────
+# ─── Core Scan & Send ─────────────────────────────────────────────────────────
 
 async def scan_and_send(bot, chat_id, threshold, is_auto=False):
     global last_ctx
     try:
         results, ctx = await get_top_signals()
-        
-        # Inform user if ban is active
+
+        # Ban detection — inform user clearly
         from engine import is_banned, get_ban_remaining_mins
         if is_banned():
             if not is_auto:
@@ -185,8 +182,9 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
                     parse_mode="Markdown"
                 )
             return
-        last_ctx     = ctx
-        filtered     = [s for s in results if s["score"] >= threshold]
+
+        last_ctx = ctx
+        filtered = [s for s in results if s["score"] >= threshold]
 
         if not filtered:
             if not is_auto:
@@ -203,12 +201,12 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
                     ),
                     parse_mode="Markdown"
                 )
-            return False  # No signals sent
+            return
 
         balance = balances.get(str(chat_id), 0)
 
         # Header
-        header = build_header(filtered, ctx, is_auto, threshold)
+        header = build_header(filtered, ctx, threshold)
         try:
             await bot.send_message(chat_id=chat_id, text=header, parse_mode="Markdown")
         except Exception:
@@ -240,20 +238,13 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
         except Exception:
             await bot.send_message(chat_id=chat_id, text=footer.replace("*","").replace("`","").replace("_",""))
 
-        return True  # Signals were sent
-
     except Exception as e:
         logger.error(f"scan_and_send [{chat_id}]: {e}", exc_info=True)
         if not is_auto:
-            await bot.send_message(chat_id=chat_id, text="⚠️ Scan error. Please try again.")
-        return False
+            await bot.send_message(chat_id=chat_id, text="⚠️ Scan error. Please try again in a moment.")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  TRADE MONITOR
-#  User registers a trade → bot checks it every 5 minutes
-#  Alerts on: SL approach, TP hits, trend reversal, RSI extreme, BTC flip
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─── Trade Monitor ────────────────────────────────────────────────────────────
 
 def get_user_trades(chat_id):
     return open_trades.get(str(chat_id), [])
@@ -264,40 +255,25 @@ def save_user_trades(chat_id, trades):
 
 
 async def fetch_current_price(symbol):
-    """
-    Fetch live price using Binance REST directly — no ccxt overhead.
-    Single lightweight call, no connection setup/teardown.
-    """
+    """Single lightweight REST call — no ccxt overhead."""
     try:
         import aiohttp
-        url    = "https://fapi.binance.com/fapi/v1/ticker/price"
-        params = {"symbol": f"{symbol}USDT"}
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
-            async with s.get(url, params=params) as r:
+            async with s.get(
+                "https://fapi.binance.com/fapi/v1/ticker/price",
+                params={"symbol": f"{symbol}USDT"}
+            ) as r:
                 if r.status == 200:
                     data = await r.json()
                     return float(data["price"])
     except Exception as e:
         logger.warning(f"Price fetch failed for {symbol}: {e}")
-        return None
+    return None
 
 
 async def monitor_trade(bot, chat_id, trade):
-    """
-    Check one open trade against current market conditions.
-    
-    Alert conditions (in order of severity):
-      🔴 EMERGENCY — Price hit or passed SL → get out NOW
-      🔴 CRITICAL  — Price within 1% of SL → prepare to exit
-      🟡 WARNING   — BTC 4H flipped against trade direction
-      🟡 WARNING   — RSI went extreme against trade (overbought on LONG etc)
-      🟡 WARNING   — Funding rate went extreme against position
-      🟢 SUCCESS   — TP1 hit → take 40% profit, move SL to entry
-      🟢 SUCCESS   — TP2 hit → take 40% profit, let 20% run
-      🟢 SUCCESS   — TP3 hit → close remaining 20%, celebrate
-    """
     symbol    = trade["symbol"]
-    direction = trade["direction"]   # "LONG" or "SHORT"
+    direction = trade["direction"]
     entry     = trade["entry"]
     tp1       = trade["tp1"]
     tp2       = trade["tp2"]
@@ -305,18 +281,16 @@ async def monitor_trade(bot, chat_id, trade):
     tp1_hit   = trade.get("tp1_hit", False)
     tp2_hit   = trade.get("tp2_hit", False)
 
-    # Fetch live price
     price = await fetch_current_price(symbol)
     if not price:
-        return trade  # Can't check without price
+        return trade
 
-    alerts = []
+    alerts  = []
     updated = False
 
     if direction == "LONG":
         pnl_pct = ((price - entry) / entry) * 100
 
-        # ── TP hits ───────────────────────────────────────────────────────
         if not tp1_hit and price >= tp1:
             alerts.append(
                 f"🎉 *TP1 HIT — {symbol} LONG*\n\n"
@@ -324,8 +298,8 @@ async def monitor_trade(bot, chat_id, trade):
                 f"TP1 was `{fmt(tp1)}`\n\n"
                 f"*Action required:*\n"
                 f"1. Close 40% of your position now\n"
-                f"2. Move your Stop Loss UP to your entry price `{fmt(entry)}`\n"
-                f"3. Your trade is now risk-free — let the rest run to TP2 `{fmt(tp2)}`\n\n"
+                f"2. Move SL up to entry price `{fmt(entry)}`\n"
+                f"3. Trade is now risk-free — let rest run to TP2 `{fmt(tp2)}`\n\n"
                 f"Profit so far: `+{pnl_pct:.2f}%` 💰"
             )
             trade["tp1_hit"] = True
@@ -336,69 +310,57 @@ async def monitor_trade(bot, chat_id, trade):
                 f"🎉 *TP2 HIT — {symbol} LONG*\n\n"
                 f"Price reached `{fmt(price)}`\n\n"
                 f"*Action required:*\n"
-                f"1. Close another 40% of your position\n"
-                f"2. Let the remaining 20% run to TP3\n"
-                f"3. Move SL up to `{fmt(tp1)}` to protect remaining profit\n\n"
+                f"1. Close another 40% of position\n"
+                f"2. Let remaining 20% run to TP3\n"
+                f"3. Move SL up to `{fmt(tp1)}` to protect profit\n\n"
                 f"Profit: `+{pnl_pct:.2f}%` 🚀"
             )
             trade["tp2_hit"] = True
             updated = True
 
-        # ── SL alerts ─────────────────────────────────────────────────────
-        sl_dist_pct = ((price - sl) / entry) * 100  # positive = safe
+        sl_dist_pct = ((price - sl) / entry) * 100
 
         if price <= sl:
             alerts.append(
                 f"🚨 *STOP LOSS HIT — {symbol} LONG*\n\n"
-                f"Current price: `{fmt(price)}`\n"
-                f"Your SL was: `{fmt(sl)}`\n\n"
-                f"*Close your position NOW if not already closed.*\n\n"
+                f"Price: `{fmt(price)}` | SL was: `{fmt(sl)}`\n\n"
+                f"*Close your position NOW if not already done.*\n"
                 f"Loss: `{pnl_pct:.2f}%`\n\n"
-                f"_This is normal. The bot will find the next setup. "
-                f"Protecting capital is the priority._"
+                f"_Small loss is fine. Bot will find the next setup._"
             )
             trade["sl_hit"] = True
             updated = True
 
-        elif -sl_dist_pct < 1.0 and price > sl:  # Within 1% of SL
+        elif -sl_dist_pct < 1.0 and price > sl:
             alerts.append(
                 f"⚠️ *SL WARNING — {symbol} LONG*\n\n"
-                f"Price `{fmt(price)}` is very close to your SL `{fmt(sl)}`\n"
+                f"Price `{fmt(price)}` is very close to SL `{fmt(sl)}`\n"
                 f"Only `{abs(sl_dist_pct):.2f}%` away\n\n"
-                f"*Watch closely.* If price closes a 1H candle below `{fmt(sl)}`, "
-                f"consider closing manually before SL triggers to get a better price."
+                f"Watch closely. Consider closing manually for better price."
             )
 
-        # ── BTC trend flip against LONG ────────────────────────────────────
-        if last_ctx and last_ctx.btc_is_bearish():
-            if not trade.get("btc_warn_sent"):
-                alerts.append(
-                    f"⚠️ *BTC TREND WARNING — {symbol} LONG*\n\n"
-                    f"BTC 4H trend has turned *BEARISH*\n"
-                    f"Your LONG on {symbol} is now fighting the market direction.\n\n"
-                    f"Current price: `{fmt(price)}` | Entry: `{fmt(entry)}`\n"
-                    f"P&L: `{pnl_pct:+.2f}%`\n\n"
-                    f"*Suggested action:*\n"
-                    f"• If you are in profit: consider closing 50% now\n"
-                    f"• Tighten your SL to just below `{fmt(price * 0.99)}`\n"
-                    f"• Do NOT add to this position"
-                )
-                trade["btc_warn_sent"] = True
-                updated = True
+        if last_ctx and last_ctx.btc_is_bearish() and not trade.get("btc_warn_sent"):
+            alerts.append(
+                f"⚠️ *BTC TREND WARNING — {symbol} LONG*\n\n"
+                f"BTC 4H has turned *BEARISH*\n"
+                f"Your LONG is now fighting market direction.\n\n"
+                f"Price: `{fmt(price)}` | P&L: `{pnl_pct:+.2f}%`\n\n"
+                f"Consider closing 50% and tightening SL."
+            )
+            trade["btc_warn_sent"] = True
+            updated = True
 
     elif direction == "SHORT":
         pnl_pct = ((entry - price) / entry) * 100
 
-        # ── TP hits ───────────────────────────────────────────────────────
         if not tp1_hit and price <= tp1:
             alerts.append(
                 f"🎉 *TP1 HIT — {symbol} SHORT*\n\n"
-                f"Price dropped to `{fmt(price)}`\n"
-                f"TP1 was `{fmt(tp1)}`\n\n"
+                f"Price dropped to `{fmt(price)}`\n\n"
                 f"*Action required:*\n"
-                f"1. Close 40% of your SHORT position\n"
-                f"2. Move SL DOWN to your entry `{fmt(entry)}`\n"
-                f"3. Trade is now risk-free — let rest run to TP2 `{fmt(tp2)}`\n\n"
+                f"1. Close 40% of SHORT position\n"
+                f"2. Move SL down to entry `{fmt(entry)}`\n"
+                f"3. Trade is now risk-free\n\n"
                 f"Profit: `+{pnl_pct:.2f}%` 💰"
             )
             trade["tp1_hit"] = True
@@ -408,25 +370,20 @@ async def monitor_trade(bot, chat_id, trade):
             alerts.append(
                 f"🎉 *TP2 HIT — {symbol} SHORT*\n\n"
                 f"Price dropped to `{fmt(price)}`\n\n"
-                f"*Action required:*\n"
-                f"1. Close another 40% of position\n"
-                f"2. Let 20% run further\n\n"
+                f"Close another 40%. Let 20% run.\n"
                 f"Profit: `+{pnl_pct:.2f}%` 🚀"
             )
             trade["tp2_hit"] = True
             updated = True
 
-        # ── SL alerts ─────────────────────────────────────────────────────
         sl_dist_pct = ((sl - price) / entry) * 100
 
         if price >= sl:
             alerts.append(
                 f"🚨 *STOP LOSS HIT — {symbol} SHORT*\n\n"
-                f"Current price: `{fmt(price)}`\n"
-                f"Your SL was: `{fmt(sl)}`\n\n"
-                f"*Close your position NOW if not already closed.*\n\n"
-                f"Loss: `{pnl_pct:.2f}%`\n\n"
-                f"_Small loss is fine. The bot finds the next setup._"
+                f"Price: `{fmt(price)}` | SL was: `{fmt(sl)}`\n\n"
+                f"*Close your position NOW if not already done.*\n"
+                f"Loss: `{pnl_pct:.2f}%`"
             )
             trade["sl_hit"] = True
             updated = True
@@ -434,28 +391,22 @@ async def monitor_trade(bot, chat_id, trade):
         elif sl_dist_pct < 1.0 and price < sl:
             alerts.append(
                 f"⚠️ *SL WARNING — {symbol} SHORT*\n\n"
-                f"Price `{fmt(price)}` is very close to your SL `{fmt(sl)}`\n"
+                f"Price `{fmt(price)}` is very close to SL `{fmt(sl)}`\n"
                 f"Only `{sl_dist_pct:.2f}%` away\n\n"
-                f"*Watch closely.* Consider closing manually to get better price."
+                f"Watch closely."
             )
 
-        # ── BTC trend flip against SHORT ───────────────────────────────────
-        if last_ctx and last_ctx.btc_is_bullish():
-            if not trade.get("btc_warn_sent"):
-                alerts.append(
-                    f"⚠️ *BTC TREND WARNING — {symbol} SHORT*\n\n"
-                    f"BTC 4H trend is *BULLISH*\n"
-                    f"Your SHORT on {symbol} is fighting the market direction.\n\n"
-                    f"Current price: `{fmt(price)}` | Entry: `{fmt(entry)}`\n"
-                    f"P&L: `{pnl_pct:+.2f}%`\n\n"
-                    f"*Suggested action:*\n"
-                    f"• If in profit: close 50% now\n"
-                    f"• Tighten SL to just above current price"
-                )
-                trade["btc_warn_sent"] = True
-                updated = True
+        if last_ctx and last_ctx.btc_is_bullish() and not trade.get("btc_warn_sent"):
+            alerts.append(
+                f"⚠️ *BTC TREND WARNING — {symbol} SHORT*\n\n"
+                f"BTC 4H is *BULLISH*\n"
+                f"Your SHORT is fighting market direction.\n\n"
+                f"Price: `{fmt(price)}` | P&L: `{pnl_pct:+.2f}%`\n\n"
+                f"Consider closing 50% and tightening SL."
+            )
+            trade["btc_warn_sent"] = True
+            updated = True
 
-    # Send all alerts
     for alert in alerts:
         try:
             await bot.send_message(chat_id=int(chat_id), text=alert, parse_mode="Markdown")
@@ -478,25 +429,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 *QuestLife Signal Bot — v5.0 FINAL*\n\n"
         "*What this bot does:*\n"
-        "• Scans top 25 Binance Futures pairs 24/7\n"
-        "• Only alerts when a genuinely high score signal is found\n"
-        "• Monitors your open trades and alerts on TP hits, SL danger, and trend reversals\n"
-        "• Gives step-by-step entry instructions for every signal\n"
-        "• Calculates exact position size based on your balance\n\n"
+        "• Scans top 25 Binance Futures pairs on demand\n"
+        "• 6 hard filters + 13 pillar scoring (130pts max)\n"
+        "• Monitors your open trades 24/7\n"
+        "• Alerts on TP hits, SL danger, BTC trend reversals\n"
+        "• Step-by-step entry guide per signal\n"
+        "• Exact position size based on your balance\n\n"
         "*Setup — do these first:*\n"
         "1. /setbalance 500 — enter your USDT balance\n"
         "2. /learn — understand the basics\n\n"
         "📋 *Commands:*\n"
-        "/signals — scan now\n"
+        "/signals — scan now (manual)\n"
         "/top — best signal now\n"
         "/briefing — market overview\n"
-        "/addtrade — register a trade to monitor\n"
-        "/mytrades — see your monitored trades\n"
-        "/closetrade — mark a trade as closed\n"
+        "/addtrade — register trade to monitor\n"
+        "/mytrades — see monitored trades\n"
+        "/closetrade — remove trade from monitor\n"
         "/setbalance 500 — set your balance\n"
         "/learn — trading education\n"
         "/status — bot info\n"
-        "/stop — unsubscribe from auto-alerts\n\n"
+        "/stop — unsubscribe\n\n"
         "⚠️ _Educational only. Not financial advice. Always use stop loss._",
         parse_mode="Markdown"
     )
@@ -527,12 +479,6 @@ async def setbalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addtrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Register a trade for monitoring.
-    Usage: /addtrade ICPUSDT LONG 3.57 3.85 3.42
-    Or:    /addtrade ICPUSDT LONG 3.57 3.85 3.42 3.70
-           (symbol, direction, entry, tp2, sl, [tp1 optional])
-    """
     chat_id = str(update.effective_chat.id)
     args    = context.args
 
@@ -541,11 +487,10 @@ async def addtrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Usage:\n"
             "`/addtrade ICPUSDT LONG 3.57 3.85 3.42`\n\n"
             "Fields: symbol direction entry tp sl\n\n"
-            "Example:\n"
+            "Examples:\n"
             "`/addtrade BTCUSDT LONG 67000 70000 65000`\n"
             "`/addtrade ETHUSDT SHORT 3200 3000 3350`\n\n"
-            "_The bot will monitor this trade 24/7 and alert you on TP hits, "
-            "SL danger, and market changes against your position._",
+            "_Bot monitors 24/7 and alerts on TP hits, SL danger, BTC trend changes._",
             parse_mode="Markdown"
         )
         return
@@ -562,11 +507,10 @@ async def addtrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Direction must be LONG or SHORT.")
             return
 
-        # Auto-calculate TP1 if not provided (midpoint between entry and TP)
-        if tp1_opt:
-            tp1 = tp1_opt
-        else:
-            tp1 = entry + (tp_main - entry) * 0.5 if direction == "LONG" else entry - (entry - tp_main) * 0.5
+        tp1 = tp1_opt if tp1_opt else (
+            entry + (tp_main - entry) * 0.5 if direction == "LONG"
+            else entry - (entry - tp_main) * 0.5
+        )
 
         trade = {
             "symbol"       : symbol,
@@ -582,9 +526,7 @@ async def addtrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "added_at"     : datetime.now(timezone.utc).isoformat(),
         }
 
-        trades = get_user_trades(chat_id)
-
-        # Check if symbol already monitored
+        trades   = get_user_trades(chat_id)
         existing = [t for t in trades if t["symbol"] == symbol and not t.get("sl_hit")]
         if existing:
             await update.message.reply_text(
@@ -596,22 +538,22 @@ async def addtrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trades.append(trade)
         save_user_trades(chat_id, trades)
 
-        sl_pct    = abs(entry - sl) / entry * 100
-        tp_pct    = abs(tp_main - entry) / entry * 100
+        sl_pct = abs(entry - sl) / entry * 100
+        tp_pct = abs(tp_main - entry) / entry * 100
         direction_word = "rises" if direction == "LONG" else "drops"
 
         await update.message.reply_text(
-            f"✅ *Trade Registered — Now Monitoring 24/7*\n\n"
+            f"✅ *Trade Registered — Monitoring 24/7*\n\n"
             f"Symbol    : `{symbol}/USDT`\n"
             f"Direction : `{direction}`\n"
             f"Entry     : `{fmt(entry)}`\n"
-            f"TP1       : `{fmt(tp1)}` _(close 40% here)_\n"
-            f"TP2       : `{fmt(tp_main)}` _(close 40% here)_\n"
+            f"TP1       : `{fmt(tp1)}` _(close 40%)_\n"
+            f"TP2       : `{fmt(tp_main)}` _(close 40%)_\n"
             f"SL        : `{fmt(sl)}`\n"
             f"Risk      : `{sl_pct:.2f}%` | Target: `{tp_pct:.2f}%`\n\n"
             f"*You will be alerted when:*\n"
             f"• Price {direction_word} to TP1 or TP2\n"
-            f"• Price comes within 1% of your SL\n"
+            f"• Price within 1% of SL\n"
             f"• BTC trend flips against your direction\n"
             f"• SL is hit\n\n"
             f"_Monitoring every 5 minutes._",
@@ -626,7 +568,6 @@ async def addtrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mytrades(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show all monitored trades for this user."""
     chat_id = str(update.effective_chat.id)
     trades  = [t for t in get_user_trades(chat_id) if not t.get("sl_hit")]
 
@@ -648,19 +589,18 @@ async def mytrades(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tp2_hit   = "✅" if t.get("tp2_hit") else "⏳"
         icon      = "🟢" if direction == "LONG" else "🔴"
 
-        # Fetch current price
         price = await fetch_current_price(symbol)
         if price:
-            pnl = ((price - entry)/entry*100) if direction=="LONG" else ((entry-price)/entry*100)
+            pnl     = ((price-entry)/entry*100) if direction=="LONG" else ((entry-price)/entry*100)
             pnl_str = f"`{pnl:+.2f}%`"
-            price_str = f"`{fmt(price)}`"
+            p_str   = f"`{fmt(price)}`"
         else:
-            pnl_str   = "N/A"
-            price_str = "N/A"
+            pnl_str = "N/A"
+            p_str   = "N/A"
 
         msg += (
             f"{icon} *{symbol}/USDT {direction}*\n"
-            f"Entry : `{fmt(entry)}` | Now: {price_str} | P&L: {pnl_str}\n"
+            f"Entry : `{fmt(entry)}` | Now: {p_str} | P&L: {pnl_str}\n"
             f"SL    : `{fmt(t['sl'])}` | TP2: `{fmt(t['tp2'])}`\n"
             f"TP1   : {tp1_hit} | TP2: {tp2_hit}\n"
             f"_/closetrade {symbol} to remove_\n\n"
@@ -673,13 +613,9 @@ async def mytrades(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def closetrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mark a trade as closed and remove from monitoring."""
     chat_id = str(update.effective_chat.id)
-
     if not context.args:
-        await update.message.reply_text(
-            "Usage: /closetrade ICPUSDT\n\nOr /closetrade ALL to close all trades."
-        )
+        await update.message.reply_text("Usage: /closetrade ICPUSDT\nOr /closetrade ALL to close all.")
         return
 
     symbol = context.args[0].upper().replace("USDT","")
@@ -692,16 +628,13 @@ async def closetrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     before = len(trades)
     trades = [t for t in trades if t["symbol"] != symbol]
-    after  = len(trades)
-
-    if before == after:
+    if before == len(trades):
         await update.message.reply_text(f"No monitored trade found for {symbol}.")
         return
 
     save_user_trades(chat_id, trades)
     await update.message.reply_text(
-        f"✅ *{symbol}/USDT removed from monitoring.*\n\n"
-        f"Use /addtrade to register a new trade.",
+        f"✅ *{symbol}/USDT removed from monitoring.*",
         parse_mode="Markdown"
     )
 
@@ -709,25 +642,25 @@ async def closetrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic = " ".join(context.args).lower() if context.args else ""
     lessons = {
-        "leverage": "📚 *Leverage*\n\nMultiplies your position. 3x leverage on $100 = control $300.\nRisk: 3x also means 3x losses. Bot recommends 1-5x max.\n10x leverage = 10% move against you = total loss.",
-        "sl":       "📚 *Stop Loss*\n\nAutomatic exit if price hits danger zone.\nSet it the moment you open the trade.\nNEVER remove it. It is what keeps you in the game long-term.",
-        "futures":  "📚 *Futures*\n\nTrade price movements without owning the coin.\nLONG = bet price goes UP.\nSHORT = bet price goes DOWN.\nAlways use USDT-Margined futures on Binance.",
-        "tp":       "📚 *Take Profit (TP1/TP2/TP3)*\n\nTP1 = close 40% (safe quick profit)\nTP2 = close 40% (main target)\nTP3 = let 20% run to catch full move\nAfter TP1: move SL to entry = risk-free trade.",
-        "position": "📚 *Position Sizing*\n\nNever risk more than 2% of balance per trade.\n$500 balance = max $10 risk per trade.\nBot calculates this automatically.\nSet balance: /setbalance 500",
-        "rsi":      "📚 *RSI (0-100)*\n\nAbove 68 = overbought, risky to buy\nBelow 32 = oversold, risky to short\nBot rejects signals in these zones automatically.\nBest entries: RSI 35-52 for LONG, 48-65 for SHORT.",
-        "monitor":  "📚 *Trade Monitor*\n\nAfter entering a trade, tell the bot:\n`/addtrade ICPUSDT LONG 3.57 3.85 3.42`\n\nBot then watches 24/7 and alerts you when:\n• TP1 or TP2 is hit\n• Price is dangerously close to SL\n• BTC trend flips against your trade\n• SL is hit",
+        "leverage": "📚 *Leverage*\n\nMultiplies your position. 3x on $100 = control $300.\nAlso multiplies losses. Bot recommends 1-5x max.\n10x leverage = 10% move against you = total loss.",
+        "sl":       "📚 *Stop Loss*\n\nSet it when you open the trade. NEVER remove it.\nIt keeps you in the game long-term.",
+        "futures":  "📚 *Futures*\n\nLONG = bet price goes UP.\nSHORT = bet price goes DOWN.\nAlways use USDT-Margined on Binance.",
+        "tp":       "📚 *Take Profit*\n\nTP1 = close 40%, TP2 = close 40%, TP3 = let 20% run.\nAfter TP1 hits: move SL to entry = risk-free trade.",
+        "position": "📚 *Position Sizing*\n\nNever risk more than 2% per trade.\n$500 balance = $10 max risk.\nSet balance: /setbalance 500",
+        "rsi":      "📚 *RSI*\n\nAbove 68 = overbought, bot rejects LONG.\nBelow 32 = oversold, bot rejects SHORT.\nBest LONG entries: RSI 35-52.",
+        "monitor":  "📚 *Trade Monitor*\n\n`/addtrade ICPUSDT LONG 3.57 3.85 3.42`\n\nBot watches 24/7, alerts on TP hits, SL danger, BTC flip.",
     }
-    if topic in lessons:
+    if topic and topic in lessons:
         await update.message.reply_text(lessons[topic], parse_mode="Markdown")
     else:
         keyboard = [
-            [InlineKeyboardButton("📊 Leverage",     callback_data="learn_leverage"),
-             InlineKeyboardButton("🛡 Stop Loss",    callback_data="learn_sl")],
-            [InlineKeyboardButton("📈 Futures",      callback_data="learn_futures"),
-             InlineKeyboardButton("🎯 Take Profit",  callback_data="learn_tp")],
-            [InlineKeyboardButton("💰 Position Size",callback_data="learn_position"),
-             InlineKeyboardButton("📉 RSI",          callback_data="learn_rsi")],
-            [InlineKeyboardButton("👁 Trade Monitor",callback_data="learn_monitor")],
+            [InlineKeyboardButton("📊 Leverage",      callback_data="learn_leverage"),
+             InlineKeyboardButton("🛡 Stop Loss",     callback_data="learn_sl")],
+            [InlineKeyboardButton("📈 Futures",       callback_data="learn_futures"),
+             InlineKeyboardButton("🎯 Take Profit",   callback_data="learn_tp")],
+            [InlineKeyboardButton("💰 Position Size", callback_data="learn_position"),
+             InlineKeyboardButton("📉 RSI",           callback_data="learn_rsi")],
+            [InlineKeyboardButton("👁 Trade Monitor", callback_data="learn_monitor")],
         ]
         await update.message.reply_text(
             "📚 *Trading Education — Pick a Topic:*",
@@ -742,12 +675,12 @@ async def learn_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic = query.data.replace("learn_","")
     lessons = {
         "leverage": "📚 *Leverage*\n\nMultiplies your position. 3x on $100 = control $300.\nAlso multiplies losses. Bot recommends 1-5x max.",
-        "sl":       "📚 *Stop Loss*\n\nSet it when you open the trade. NEVER remove it.\nIt is what keeps you in the game long-term.",
+        "sl":       "📚 *Stop Loss*\n\nSet it when you open the trade. NEVER remove it.\nIt keeps you in the game long-term.",
         "futures":  "📚 *Futures*\n\nLONG = bet price goes UP.\nSHORT = bet price goes DOWN.\nAlways use USDT-Margined on Binance.",
         "tp":       "📚 *Take Profit*\n\nTP1 = close 40%, TP2 = close 40%, TP3 = let 20% run.\nAfter TP1: move SL to entry = risk-free.",
-        "position": "📚 *Position Sizing*\n\nNever risk more than 2% per trade.\n$500 balance = $10 max risk.\nBot calculates it: /setbalance 500",
+        "position": "📚 *Position Sizing*\n\nNever risk more than 2% per trade.\n$500 balance = $10 max risk.\n/setbalance 500",
         "rsi":      "📚 *RSI*\n\nAbove 68 = overbought (bot rejects LONG)\nBelow 32 = oversold (bot rejects SHORT)\nBest LONG entries: RSI 35-52.",
-        "monitor":  "📚 *Trade Monitor*\n\n`/addtrade ICPUSDT LONG 3.57 3.85 3.42`\n\nBot watches 24/7 → alerts on TP hits, SL danger, BTC trend flip.",
+        "monitor":  "📚 *Trade Monitor*\n\n`/addtrade ICPUSDT LONG 3.57 3.85 3.42`\n\nBot watches 24/7 — alerts on TP hits and SL danger.",
     }
     text = lessons.get(topic, "Topic not found. Try /learn")
     try:
@@ -764,7 +697,7 @@ async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⏳ Please wait {wait}s before scanning again.")
         return
     last_scan_time[chat_id] = now
-    msg = await update.message.reply_text("🔎 Running strict 13-pillar scan...")
+    msg = await update.message.reply_text("🔎 Running strict 13-pillar scan across top 25 pairs...")
     await scan_and_send(context.bot, chat_id, threshold=MANUAL_THRESHOLD)
     try:
         await msg.delete()
@@ -776,6 +709,16 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🏆 Finding the single best signal...")
     try:
         results, ctx = await get_top_signals()
+
+        from engine import is_banned, get_ban_remaining_mins
+        if is_banned():
+            mins = get_ban_remaining_mins()
+            await update.message.reply_text(
+                f"⏸ *Binance API rate-limited*\n\nAuto-resumes in `{mins} minutes`.",
+                parse_mode="Markdown"
+            )
+            return
+
         if not results:
             await update.message.reply_text(
                 "📭 *No signal passed strict criteria.*\n\n"
@@ -821,10 +764,14 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
         btc_icon   = "🟢" if ctx.btc_is_bullish() else ("🔴" if ctx.btc_is_bearish() else "⚪")
         daily_icon = "🟢" if ctx.btc_trend_daily == "BULL" else ("🔴" if ctx.btc_trend_daily == "BEAR" else "⚪")
         fg_icon    = "😱" if ctx.is_extreme_fear() else ("🤑" if ctx.is_extreme_greed() else "😐")
-        price_str = f"${ctx.btc_price:,.0f}" if ctx.btc_price and ctx.btc_price > 0 else "fetching..."
+        price_str  = f"${ctx.btc_price:,.0f}" if ctx.btc_price and ctx.btc_price > 0 else "fetching..."
         change_val = ctx.btc_change_24h or 0
         change_str = f"up {change_val:.1f}pct" if change_val >= 0 else f"down {abs(change_val):.1f}pct"
         fg_bar     = "█" * (ctx.fear_greed // 10) + "░" * (10 - ctx.fear_greed // 10)
+        ls_str     = f"{ctx.ls_ratio:.2f}" if ctx.ls_ratio else "N/A"
+        oi_val     = ctx.oi_change_pct or 0
+        oi_str     = f"up {oi_val:.1f}pct" if oi_val >= 0 else f"down {abs(oi_val):.1f}pct"
+        dom_str    = f"{ctx.btc_dominance:.1f}pct" if ctx.btc_dominance else "N/A"
 
         if ctx.btc_is_bearish():            verdict = "🔴 BTC bearish — all alt LONGs blocked"
         elif ctx.btc_is_bullish() and ctx.fear_greed < 50: verdict = "🟢 BTC bullish + Fear = strong LONG environment"
@@ -839,11 +786,15 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"4H: {btc_icon} `{ctx.btc_trend_4h}` | Daily: {daily_icon} `{ctx.btc_trend_daily}`\n\n"
             f"F&G: `{ctx.fear_greed}/100` {fg_icon} {ctx.fear_greed_label}\n"
             f"`{fg_bar}`\n"
-            f"BTC Dom: `{ctx.btc_dominance:.1f}pct` | L/S: `{ctx.ls_ratio:.2f}`\n"
-            f"OI: `{'up' if ctx.oi_change_pct>=0 else 'down'} {abs(ctx.oi_change_pct):.1f}pct`\n\n"
+            f"BTC Dom: `{dom_str}` | L/S: `{ls_str}`\n"
+            f"OI: `{oi_str}`\n\n"
         )
         if ctx.macro_event_today:
-            report += f"🚨 *MACRO: {ctx.macro_event_name}* ({ctx.macro_event_impact})\nReduce position sizes today.\n\n"
+            report += (
+                f"🚨 *MACRO EVENT TODAY*\n"
+                f"`{ctx.macro_event_name}` ({ctx.macro_event_impact})\n"
+                f"Reduce position sizes today.\n\n"
+            )
         else:
             report += "✅ No major macro events today\n\n"
         report += f"*Verdict:* {verdict}"
@@ -854,7 +805,10 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=update.effective_chat.id, text=report.replace("*","").replace("`","").replace("_",""))
     except Exception as e:
         logger.error(f"/briefing: {e}", exc_info=True)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Briefing failed. Try /signals first then /briefing.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="⚠️ Briefing failed. Try /signals first then /briefing again."
+        )
     finally:
         try:
             await msg.delete()
@@ -865,23 +819,27 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribers.discard(update.effective_chat.id)
     save_json(SUBSCRIBERS_FILE, list(subscribers))
-    await update.message.reply_text("🔕 Unsubscribed from auto-alerts. Use /start to resubscribe.")
+    await update.message.reply_text("🔕 Unsubscribed. Use /start to resubscribe anytime.")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id  = str(update.effective_chat.id)
-    btc_str  = f"${last_ctx.btc_price:,.0f} ({last_ctx.btc_trend_4h})" if last_ctx else "Run /signals first"
+    btc_str  = f"${last_ctx.btc_price:,.0f} ({last_ctx.btc_trend_4h})" if last_ctx and last_ctx.btc_price > 0 else "Send /briefing first"
     bal_str  = f"${balances[chat_id]:,.2f}" if chat_id in balances else "Not set — /setbalance"
     trades   = [t for t in get_user_trades(chat_id) if not t.get("sl_hit")]
     news_str = "Active" if os.getenv("CRYPTOPANIC_TOKEN") else "Add CRYPTOPANIC_TOKEN to enable"
+
+    from engine import is_banned, get_ban_remaining_mins
+    ban_str = f"⏸ Rate-limited ({get_ban_remaining_mins()}min remaining)" if is_banned() else "✅ Clear"
+
     await update.message.reply_text(
         "✅ *Bot Status: Online — v5.0 FINAL*\n\n"
         f"Your balance     : `{bal_str}`\n"
         f"Active trades    : `{len(trades)}` being monitored\n"
         f"Subscribers      : `{len(subscribers)}`\n"
-        f"Signal scan      : every `1 hour` (opportunity-only alerts)\n"
-        f"Trade monitor    : every `5 min`\n"
-        f"Auto threshold   : `{AUTO_THRESHOLD}%`\n"
+        f"Auto scan        : `Disabled` (manual /signals only)\n"
+        f"Trade monitor    : `Every 5 min` (lightweight)\n"
+        f"Binance API      : `{ban_str}`\n"
         f"Manual threshold : `{MANUAL_THRESHOLD}%`\n"
         f"Max signals      : `{MAX_SIGNALS}` per scan\n"
         f"Hard filters     : `6`\n"
@@ -892,28 +850,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ─── Background Jobs ──────────────────────────────────────────────────────────
-
-async def opportunity_scan_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Scans every 20 minutes but ONLY sends alert if a qualifying signal is found.
-    No noise. No 'no signals found' messages. Pure opportunity alerts only.
-    """
-    if not subscribers:
-        return
-    logger.info(f"Opportunity scan for {len(subscribers)} subscriber(s)...")
-    for chat_id in list(subscribers):
-        sent = await scan_and_send(context.bot, chat_id, threshold=AUTO_THRESHOLD, is_auto=True)
-        if sent:
-            logger.info(f"Signal alert sent to {chat_id}")
-        await asyncio.sleep(1)
-
-
 async def trade_monitor_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Runs every 5 minutes.
-    Checks every user's open trades and fires alerts if needed.
-    """
+    """Runs every 5 minutes — checks all open trades."""
     for chat_id, trades in list(open_trades.items()):
         active = [t for t in trades if not t.get("sl_hit") and not t.get("tp2_hit")]
         if not active:
@@ -953,13 +891,13 @@ def main():
     app.add_handler(CommandHandler("status",     status))
     app.add_handler(CallbackQueryHandler(learn_callback, pattern="^learn_"))
 
-    # Opportunity-only scan every 20 min (no alert if nothing qualifies)
-    app.job_queue.run_repeating(opportunity_scan_job, interval=3600, first=300)
+    # Auto scan DISABLED — causes Binance 418 bans
+    # Use /signals manually instead
 
-    # Trade monitor every 5 min
+    # Trade monitor only — lightweight, safe, no ban risk
     app.job_queue.run_repeating(trade_monitor_job, interval=300, first=30)
 
-    logger.info(f"QuestLife Bot v5.0 FINAL | {len(subscribers)} subscribers | Trade monitor active")
+    logger.info(f"QuestLife Bot v5.0 FINAL | {len(subscribers)} subscribers | Auto scan OFF | Trade monitor ON")
     app.run_polling(drop_pending_updates=True)
 
 
