@@ -50,7 +50,9 @@ subscribers    = set(load_json(SUBSCRIBERS_FILE, []))
 balances       = load_json(BALANCES_FILE, {})
 open_trades    = load_json(TRADES_FILE, {})
 last_scan_time = {}
-last_ctx       = None
+last_ctx          = None
+last_ctx_time     = 0   # timestamp of last context build
+CTX_CACHE_MINUTES = 30  # only rebuild context every 30 min
 
 
 # ─── Price Formatter ──────────────────────────────────────────────────────────
@@ -758,7 +760,9 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("📊 Fetching market intelligence...")
     try:
         # Always refresh if price is missing or context is empty
-        if last_ctx is None or last_ctx.btc_price == 0:
+       import time as _time
+ctx_age_mins = (_time.time() - last_ctx_time) / 60
+if last_ctx is None or last_ctx.btc_price == 0 or ctx_age_mins > CTX_CACHE_MINUTES:
             import ccxt.async_support as ccxt_lib
             from market_intel import build_market_context
             exchange = ccxt_lib.binance({
