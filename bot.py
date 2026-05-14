@@ -76,11 +76,11 @@ def calc_position(balance_usdt, sl_pct, lev):
 # ─── Signal Formatter ─────────────────────────────────────────────────────────
 
 def fmt_signal(res, rank, balance=None):
-    medal    = {0:"🥇",1:"🥈",2:"🥉"}.get(rank,"💎")
-    score    = res["score"]
-    fr_str   = f"{res['funding_rate']:+.4f}%" if res.get("funding_rate") is not None else "N/A"
-    quality  = "🔥 ELITE" if score>=110 else ("⚡ STRONG" if score>=95 else ("✅ GOOD" if score>=85 else "📊 VALID"))
-    news_ic  = {"POSITIVE":"📰✅","NEGATIVE":"📰❌"}.get(res.get("news",""),"")
+    medal   = {0:"🥇",1:"🥈",2:"🥉"}.get(rank,"💎")
+    score   = res["score"]
+    fr_str  = f"{res['funding_rate']:+.4f}%" if res.get("funding_rate") is not None else "N/A"
+    quality = "🔥 ELITE" if score>=110 else ("⚡ STRONG" if score>=95 else ("✅ GOOD" if score>=85 else "📊 VALID"))
+    news_ic = {"POSITIVE":"📰✅","NEGATIVE":"📰❌"}.get(res.get("news",""),"")
 
     out = (
         f"{medal} *{res['symbol']}* {res['dir']} {news_ic}\n"
@@ -108,7 +108,12 @@ def fmt_signal(res, rank, balance=None):
         out += f"News    : _{res['news_headline'][:65]}_\n"
 
     out += f"Reason  : _{res['reasons'][:85]}_\n"
-    out += f"\n_Reply /addtrade {res['symbol'].replace('/USDT','')} {'LONG' if 'LONG' in res['dir'] else 'SHORT'} {fmt(res['entry'])} {fmt(res['tp2'])} {fmt(res['sl'])} to monitor_"
+    out += (
+        f"\n_To monitor: /addtrade "
+        f"{res['symbol'].replace('/USDT','')} "
+        f"{'LONG' if 'LONG' in res['dir'] else 'SHORT'} "
+        f"{fmt(res['entry'])} {fmt(res['tp2'])} {fmt(res['sl'])}_"
+    )
     out += "\n" + "─" * 30 + "\n\n"
     return out
 
@@ -116,10 +121,12 @@ def fmt_signal(res, rank, balance=None):
 def fmt_guide(res):
     side = "BUY / LONG" if "LONG" in res["dir"] else "SELL / SHORT"
     icon = "🟢" if "LONG" in res["dir"] else "🔴"
+    sym  = res['symbol'].replace('/USDT','')
+    dir_ = 'LONG' if 'LONG' in res['dir'] else 'SHORT'
     return (
         f"📖 *HOW TO ENTER: {res['symbol']}*\n\n"
         f"*Step 1 — Open Binance App*\n"
-        f"Futures → USDT-M → search `{res['symbol'].replace('/USDT','')}`\n\n"
+        f"Futures → USDT-M → search `{sym}`\n\n"
         f"*Step 2 — Set Leverage*\n"
         f"Set to `{res['lev']}x` max. Do not go higher.\n\n"
         f"*Step 3 — Place Order*\n"
@@ -134,11 +141,10 @@ def fmt_guide(res):
         f"TP2 `{fmt(res['tp2'])}` → close 40% of position\n"
         f"TP3 `{fmt(res['tp3'])}` → close remaining 20%\n\n"
         f"*Step 6 — After TP1 hits*\n"
-        f"Move your SL to entry `{fmt(res['entry'])}` → trade is now risk-free\n\n"
-        f"*If SL hits:* Accept the loss. Do not add more money.\n"
-        f"The bot will find the next setup.\n\n"
+        f"Move SL to entry `{fmt(res['entry'])}` → trade is now risk-free\n\n"
+        f"*If SL hits:* Accept the loss. Do not add more money.\n\n"
         f"*To monitor this trade:*\n"
-        f"`/addtrade {res['symbol'].replace('/USDT','')} {'LONG' if 'LONG' in res['dir'] else 'SHORT'} {fmt(res['entry'])} {fmt(res['tp2'])} {fmt(res['sl'])}`"
+        f"`/addtrade {sym} {dir_} {fmt(res['entry'])} {fmt(res['tp2'])} {fmt(res['sl'])}`"
     )
 
 
@@ -165,7 +171,7 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
     try:
         results, ctx = await get_top_signals()
 
-        # Ban detection — inform user clearly
+        # Ban detection
         from engine import is_banned, get_ban_remaining_mins
         if is_banned():
             if not is_auto:
@@ -205,14 +211,12 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
 
         balance = balances.get(str(chat_id), 0)
 
-        # Header
         header = build_header(filtered, ctx, threshold)
         try:
             await bot.send_message(chat_id=chat_id, text=header, parse_mode="Markdown")
         except Exception:
             await bot.send_message(chat_id=chat_id, text=header.replace("*","").replace("`","").replace("_",""))
 
-        # Each signal + guide
         for i, res in enumerate(filtered):
             sig = fmt_signal(res, i, balance if balance > 0 else None)
             try:
@@ -255,7 +259,6 @@ def save_user_trades(chat_id, trades):
 
 
 async def fetch_current_price(symbol):
-    """Single lightweight REST call — no ccxt overhead."""
     try:
         import aiohttp
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
@@ -299,7 +302,7 @@ async def monitor_trade(bot, chat_id, trade):
                 f"*Action required:*\n"
                 f"1. Close 40% of your position now\n"
                 f"2. Move SL up to entry price `{fmt(entry)}`\n"
-                f"3. Trade is now risk-free — let rest run to TP2 `{fmt(tp2)}`\n\n"
+                f"3. Trade is now risk-free\n\n"
                 f"Profit so far: `+{pnl_pct:.2f}%` 💰"
             )
             trade["tp1_hit"] = True
@@ -309,10 +312,9 @@ async def monitor_trade(bot, chat_id, trade):
             alerts.append(
                 f"🎉 *TP2 HIT — {symbol} LONG*\n\n"
                 f"Price reached `{fmt(price)}`\n\n"
-                f"*Action required:*\n"
                 f"1. Close another 40% of position\n"
                 f"2. Let remaining 20% run to TP3\n"
-                f"3. Move SL up to `{fmt(tp1)}` to protect profit\n\n"
+                f"3. Move SL up to `{fmt(tp1)}`\n\n"
                 f"Profit: `+{pnl_pct:.2f}%` 🚀"
             )
             trade["tp2_hit"] = True
@@ -336,7 +338,7 @@ async def monitor_trade(bot, chat_id, trade):
                 f"⚠️ *SL WARNING — {symbol} LONG*\n\n"
                 f"Price `{fmt(price)}` is very close to SL `{fmt(sl)}`\n"
                 f"Only `{abs(sl_dist_pct):.2f}%` away\n\n"
-                f"Watch closely. Consider closing manually for better price."
+                f"Watch closely. Consider closing manually."
             )
 
         if last_ctx and last_ctx.btc_is_bearish() and not trade.get("btc_warn_sent"):
@@ -357,7 +359,6 @@ async def monitor_trade(bot, chat_id, trade):
             alerts.append(
                 f"🎉 *TP1 HIT — {symbol} SHORT*\n\n"
                 f"Price dropped to `{fmt(price)}`\n\n"
-                f"*Action required:*\n"
                 f"1. Close 40% of SHORT position\n"
                 f"2. Move SL down to entry `{fmt(entry)}`\n"
                 f"3. Trade is now risk-free\n\n"
@@ -439,7 +440,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. /setbalance 500 — enter your USDT balance\n"
         "2. /learn — understand the basics\n\n"
         "📋 *Commands:*\n"
-        "/signals — scan now (manual)\n"
+        "/signals — scan now (manual only)\n"
         "/top — best signal now\n"
         "/briefing — market overview\n"
         "/addtrade — register trade to monitor\n"
@@ -489,8 +490,7 @@ async def addtrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Fields: symbol direction entry tp sl\n\n"
             "Examples:\n"
             "`/addtrade BTCUSDT LONG 67000 70000 65000`\n"
-            "`/addtrade ETHUSDT SHORT 3200 3000 3350`\n\n"
-            "_Bot monitors 24/7 and alerts on TP hits, SL danger, BTC trend changes._",
+            "`/addtrade ETHUSDT SHORT 3200 3000 3350`",
             parse_mode="Markdown"
         )
         return
@@ -732,9 +732,16 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
             guide   = fmt_guide(best)
             for text in ["🏆 *BEST SIGNAL NOW*\n\n" + sig, guide]:
                 try:
-                    await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode="Markdown")
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=text,
+                        parse_mode="Markdown"
+                    )
                 except Exception:
-                    await context.bot.send_message(chat_id=update.effective_chat.id, text=text.replace("*","").replace("`","").replace("_",""))
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=text.replace("*","").replace("`","").replace("_","")
+                    )
                 await asyncio.sleep(0.3)
     except Exception as e:
         logger.error(f"/top: {e}", exc_info=True)
@@ -750,29 +757,39 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_ctx
     msg = await update.message.reply_text("📊 Fetching market intelligence...")
     try:
+        # Always refresh if price is missing or context is empty
         if last_ctx is None or last_ctx.btc_price == 0:
-    import ccxt.async_support as ccxt_lib
-    from market_intel import build_market_context
-    exchange = ccxt_lib.binance({
-        "options": {"defaultType": "future"},
-        "enableRateLimit": True,
-    })
-    try:
-        await exchange.load_markets()
-        last_ctx = await build_market_context(exchange, [], os.getenv("CRYPTOPANIC_TOKEN",""))
-    except Exception as e:
-        logger.error(f"Context build failed: {e}")
-    finally:
-        try:
-            await exchange.close()
-        except Exception:
-            pass
+            import ccxt.async_support as ccxt_lib
+            from market_intel import build_market_context
+            exchange = ccxt_lib.binance({
+                "options"        : {"defaultType": "future"},
+                "enableRateLimit": True,
+            })
+            try:
+                await exchange.load_markets()
+                last_ctx = await build_market_context(
+                    exchange, [], os.getenv("CRYPTOPANIC_TOKEN", "")
+                )
+            except Exception as e:
+                logger.error(f"Context build failed: {e}")
+            finally:
+                try:
+                    await exchange.close()
+                except Exception:
+                    pass
+
+        if last_ctx is None:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⚠️ Could not fetch market data. Please try /signals first then /briefing again."
+            )
+            return
 
         ctx        = last_ctx
         btc_icon   = "🟢" if ctx.btc_is_bullish() else ("🔴" if ctx.btc_is_bearish() else "⚪")
         daily_icon = "🟢" if ctx.btc_trend_daily == "BULL" else ("🔴" if ctx.btc_trend_daily == "BEAR" else "⚪")
         fg_icon    = "😱" if ctx.is_extreme_fear() else ("🤑" if ctx.is_extreme_greed() else "😐")
-        price_str  = f"${ctx.btc_price:,.0f}" if ctx.btc_price and ctx.btc_price > 0 else "fetching..."
+        price_str  = f"${ctx.btc_price:,.0f}" if ctx.btc_price and ctx.btc_price > 0 else "N/A"
         change_val = ctx.btc_change_24h or 0
         change_str = f"up {change_val:.1f}pct" if change_val >= 0 else f"down {abs(change_val):.1f}pct"
         fg_bar     = "█" * (ctx.fear_greed // 10) + "░" * (10 - ctx.fear_greed // 10)
@@ -781,11 +798,16 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
         oi_str     = f"up {oi_val:.1f}pct" if oi_val >= 0 else f"down {abs(oi_val):.1f}pct"
         dom_str    = f"{ctx.btc_dominance:.1f}pct" if ctx.btc_dominance else "N/A"
 
-        if ctx.btc_is_bearish():            verdict = "🔴 BTC bearish — all alt LONGs blocked"
-        elif ctx.btc_is_bullish() and ctx.fear_greed < 50: verdict = "🟢 BTC bullish + Fear = strong LONG environment"
-        elif ctx.is_extreme_greed():        verdict = "⚠️ Extreme Greed — reduce position sizes"
-        elif ctx.is_extreme_fear():         verdict = "💡 Extreme Fear — historically best LONG zone"
-        else:                               verdict = "⚪ Neutral — follow signal scores"
+        if ctx.btc_is_bearish():
+            verdict = "🔴 BTC bearish — all alt LONGs blocked"
+        elif ctx.btc_is_bullish() and ctx.fear_greed < 50:
+            verdict = "🟢 BTC bullish + Fear = strong LONG environment"
+        elif ctx.is_extreme_greed():
+            verdict = "⚠️ Extreme Greed — reduce position sizes"
+        elif ctx.is_extreme_fear():
+            verdict = "💡 Extreme Fear — historically best LONG zone"
+        else:
+            verdict = "⚪ Neutral — follow signal scores"
 
         report = (
             "📊 *MARKET BRIEFING*\n"
@@ -805,12 +827,21 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             report += "✅ No major macro events today\n\n"
+
         report += f"*Verdict:* {verdict}"
 
         try:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=report, parse_mode="Markdown")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=report,
+                parse_mode="Markdown"
+            )
         except Exception:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=report.replace("*","").replace("`","").replace("_",""))
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=report.replace("*","").replace("`","").replace("_","")
+            )
+
     except Exception as e:
         logger.error(f"/briefing: {e}", exc_info=True)
         await context.bot.send_message(
@@ -859,7 +890,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def trade_monitor_job(context: ContextTypes.DEFAULT_TYPE):
-    """Runs every 5 minutes — checks all open trades."""
     for chat_id, trades in list(open_trades.items()):
         active = [t for t in trades if not t.get("sl_hit") and not t.get("tp2_hit")]
         if not active:
@@ -900,8 +930,6 @@ def main():
     app.add_handler(CallbackQueryHandler(learn_callback, pattern="^learn_"))
 
     # Auto scan DISABLED — causes Binance 418 bans
-    # Use /signals manually instead
-
     # Trade monitor only — lightweight, safe, no ban risk
     app.job_queue.run_repeating(trade_monitor_job, interval=300, first=30)
 
