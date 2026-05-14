@@ -750,15 +750,23 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_ctx
     msg = await update.message.reply_text("📊 Fetching market intelligence...")
     try:
-        if last_ctx is None:
-            import ccxt.async_support as ccxt_lib
-            from market_intel import build_market_context
-            exchange = ccxt_lib.binance({"options":{"defaultType":"future"},"enableRateLimit":True})
-            try:
-                await exchange.load_markets()
-                last_ctx = await build_market_context(exchange, [], "")
-            finally:
-                await exchange.close()
+        if last_ctx is None or last_ctx.btc_price == 0:
+    import ccxt.async_support as ccxt_lib
+    from market_intel import build_market_context
+    exchange = ccxt_lib.binance({
+        "options": {"defaultType": "future"},
+        "enableRateLimit": True,
+    })
+    try:
+        await exchange.load_markets()
+        last_ctx = await build_market_context(exchange, [], os.getenv("CRYPTOPANIC_TOKEN",""))
+    except Exception as e:
+        logger.error(f"Context build failed: {e}")
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
 
         ctx        = last_ctx
         btc_icon   = "🟢" if ctx.btc_is_bullish() else ("🔴" if ctx.btc_is_bearish() else "⚪")
