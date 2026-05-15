@@ -320,6 +320,7 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
     rsi   = last["RSI_14"]
     atr   = last["ATR_14"]
 
+    if adx < MIN_ADX: return None
     if pd.isna(atr) or atr == 0 or atr < entry * 0.0001: return None
 
     score = 0; direction = None; reasons = []
@@ -331,12 +332,6 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
 
     # BTC Gate
     if coin != "BTC" and direction == "LONG" and ctx.btc_is_bearish(): return None
-
-    # ADX filter — direction aware
-    # SHORTs allowed at ADX 18+ (downtrends have naturally lower ADX)
-    # LONGs require ADX 22+ (need stronger trend to go long)
-    adx_min = 18 if direction == "SHORT" else MIN_ADX
-    if adx < adx_min: return None
 
     # Pillar 2: EMA 200 (10pts)
     ema200 = last["EMA_200"]
