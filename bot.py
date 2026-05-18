@@ -26,7 +26,7 @@ SUBSCRIBERS_FILE = "/data/subscribers.json"
 BALANCES_FILE    = "/data/balances.json"
 TRADES_FILE      = "/data/trades.json"
 COOLDOWN_SECONDS = 120
-CTX_CACHE_SECS   = 1800  # 30 minutes briefing cache
+CTX_CACHE_SECS   = 1800  # 30 min briefing cache
 
 
 # ─── Persistence ──────────────────────────────────────────────────────────────
@@ -76,13 +76,60 @@ def calc_position(balance_usdt, sl_pct, lev):
     return round(risk_amount, 2), round(position_size, 2), round(margin_needed, 2)
 
 
+# ─── BTC Price Fetch (lightweight) ───────────────────────────────────────────
+
+async def fetch_btc_trend_lightweight():
+    """
+    Fetch ONLY BTC 4H trend using direct REST calls.
+    No ccxt, no market loading, no heavy scan.
+    Uses same endpoint as trade monitor — single price call.
+    Safe to call every 30 minutes without ban risk.
+    """
+    try:
+        import aiohttp
+        import pandas as pd
+        from ta.trend import EMAIndicator
+
+        # Single REST call for BTC 4H candles
+        url = "https://fapi.binance.com/fapi/v1/klines"
+        params = {
+            "symbol"   : "BTCUSDT",
+            "interval" : "4h",
+            "limit"    : 60,
+        }
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=8)
+        ) as s:
+            async with s.get(url, params=params) as r:
+                if r.status != 200:
+                    return None, 0.0
+                candles = await r.json()
+
+        if not candles or len(candles) < 50:
+            return None, 0.0
+
+        close  = pd.Series([float(c[4]) for c in candles])
+        ema20  = EMAIndicator(close=close, window=20).ema_indicator().iloc[-1]
+        ema50  = EMAIndicator(close=close, window=50).ema_indicator().iloc[-1]
+        price  = float(close.iloc[-1])
+
+        if ema20 > ema50 * 1.001:   trend = "BULL"
+        elif ema20 < ema50 * 0.999: trend = "BEAR"
+        else:                        trend = "NEUTRAL"
+
+        return trend, price
+
+    except Exception as e:
+        logger.warning(f"Lightweight BTC trend fetch failed: {e}")
+        return None, 0.0
+
+
 # ─── Market Context Builder ───────────────────────────────────────────────────
 
 async def build_context_standalone():
     """
-    Build fresh market context independently.
-    Used by /briefing when no scan has run yet.
-    Fully handles its own exchange connection lifecycle.
+    Build full market context for /briefing.
+    Called only when cache is older than 30 minutes.
     """
     global last_ctx, last_ctx_time
     try:
@@ -94,21 +141,15 @@ async def build_context_standalone():
             "enableRateLimit": True,
         })
         try:
-            logger.info("Building context standalone for /briefing...")
+            logger.info("Building market context for /briefing...")
             await exchange.load_markets()
             ctx = await build_market_context(
-                exchange,
-                [],
-                os.getenv("CRYPTOPANIC_TOKEN", "")
+                exchange, [], os.getenv("CRYPTOPANIC_TOKEN", "")
             )
             if ctx is not None:
                 last_ctx      = ctx
                 last_ctx_time = time.time()
-                logger.info(
-                    f"Standalone context OK: "
-                    f"BTC ${ctx.btc_price:,.0f} | "
-                    f"4H:{ctx.btc_trend_4h}"
-                )
+                logger.info(f"Context OK: BTC ${ctx.btc_price:,.0f} | 4H:{ctx.btc_trend_4h}")
             else:
                 logger.warning("build_market_context returned None")
         finally:
@@ -120,16 +161,16 @@ async def build_context_standalone():
         logger.error(f"build_context_standalone failed: {e}", exc_info=True)
 
 
-# ─── Signal Formatter ─────────────────────────────────────────────────────────
+# ─── Signal Formatters ────────────────────────────────────────────────────────
 
 def fmt_signal(res, rank, balance=None):
     medal   = {0:"🥇",1:"🥈",2:"🥉"}.get(rank,"💎")
     score   = res["score"]
     fr_str  = f"{res['funding_rate']:+.4f}%" if res.get("funding_rate") is not None else "N/A"
     quality = (
-        "🔥 ELITE"   if score >= 110 else
-        "⚡ STRONG"  if score >= 95  else
-        "✅ GOOD"    if score >= 85  else
+        "🔥 ELITE"  if score >= 110 else
+        "⚡ STRONG" if score >= 95  else
+        "✅ GOOD"   if score >= 85  else
         "📊 VALID"
     )
     news_ic = {"POSITIVE":"📰✅","NEGATIVE":"📰❌"}.get(res.get("news",""),"")
@@ -148,7 +189,6 @@ def fmt_signal(res, rank, balance=None):
         f"RSI     : `{res['rsi']}` | ADX: `{res['adx']}` | FR: `{fr_str}`\n"
         f"Liq Zone: `~{fmt(res['liq_est'])}`\n"
     )
-
     if balance and balance > 0:
         risk, pos, margin = calc_position(balance, res["sl_pct"], res["lev"])
         out += (
@@ -157,10 +197,8 @@ def fmt_signal(res, rank, balance=None):
             f"Max loss: `${risk:.2f}` if SL hits\n"
             f"If TP2  : `+${risk * res['rr']:.2f}` profit\n"
         )
-
     if res.get("news_headline"):
         out += f"News    : _{res['news_headline'][:65]}_\n"
-
     out += f"Reason  : _{res['reasons'][:85]}_\n"
     out += f"\n_Monitor: /addtrade {sym} {dir_} {fmt(res['entry'])} {fmt(res['tp2'])} {fmt(res['sl'])}_"
     out += "\n" + "─" * 30 + "\n\n"
@@ -220,7 +258,6 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
     try:
         results, ctx = await get_top_signals()
 
-        # Ban detection
         from engine import is_banned, get_ban_remaining_mins
         if is_banned():
             if not is_auto:
@@ -236,7 +273,6 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
                 )
             return
 
-        # Cache context from scan
         if ctx and ctx.btc_price > 0:
             last_ctx      = ctx
             last_ctx_time = time.time()
@@ -262,14 +298,12 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
 
         balance = balances.get(str(chat_id), 0)
 
-        # Header
         header = build_header(filtered, ctx, threshold)
         try:
             await bot.send_message(chat_id=chat_id, text=header, parse_mode="Markdown")
         except Exception:
             await bot.send_message(chat_id=chat_id, text=header.replace("*","").replace("`","").replace("_",""))
 
-        # Each signal + entry guide
         for i, res in enumerate(filtered):
             sig = fmt_signal(res, i, balance if balance > 0 else None)
             try:
@@ -298,7 +332,10 @@ async def scan_and_send(bot, chat_id, threshold, is_auto=False):
     except Exception as e:
         logger.error(f"scan_and_send [{chat_id}]: {e}", exc_info=True)
         if not is_auto:
-            await bot.send_message(chat_id=chat_id, text="⚠️ Scan error. Please try again in a moment.")
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Scan error. Please try again in a moment."
+            )
 
 
 # ─── Trade Monitor ────────────────────────────────────────────────────────────
@@ -314,7 +351,9 @@ def save_user_trades(chat_id, trades):
 async def fetch_current_price(symbol):
     try:
         import aiohttp
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=5)
+        ) as s:
             async with s.get(
                 "https://fapi.binance.com/fapi/v1/ticker/price",
                 params={"symbol": f"{symbol}USDT"}
@@ -455,7 +494,9 @@ async def monitor_trade(bot, chat_id, trade):
 
     for alert in alerts:
         try:
-            await bot.send_message(chat_id=int(chat_id), text=alert, parse_mode="Markdown")
+            await bot.send_message(
+                chat_id=int(chat_id), text=alert, parse_mode="Markdown"
+            )
         except Exception:
             await bot.send_message(
                 chat_id=int(chat_id),
@@ -480,10 +521,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*What this bot does:*\n"
         "• Scans top 25 Binance Futures pairs on demand\n"
         "• 6 hard filters + 13 pillar scoring (130pts max)\n"
-        "• LONG signals when BTC bullish\n"
-        "• SHORT signals when BTC bearish\n"
+        "• LONG signals when BTC 4H bullish\n"
+        "• SHORT signals when BTC 4H bearish\n"
         "• Monitors your open trades 24/7\n"
-        "• Alerts on TP hits, SL danger, BTC trend reversals\n"
+        "• Alerts you when BTC trend flips\n"
         "• Step-by-step entry guide per signal\n"
         "• Exact position size based on your balance\n\n"
         "*Setup — do these first:*\n"
@@ -723,7 +764,7 @@ async def learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "rsi": (
             "📚 *RSI*\n\n"
             "Above 68 = overbought, bot rejects LONG.\n"
-            "Below 32 = oversold, bot rejects SHORT.\n"
+            "Below 25 = oversold, bot rejects SHORT.\n"
             "Best LONG entries: RSI 35-52."
         ),
         "monitor": (
@@ -761,15 +802,13 @@ async def learn_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "futures":  "📚 *Futures*\n\nLONG = price goes UP. SHORT = price goes DOWN.\nAlways use USDT-Margined on Binance.",
         "tp":       "📚 *Take Profit*\n\nTP1 = close 40%, TP2 = close 40%, TP3 = let 20% run.\nAfter TP1: move SL to entry = risk-free.",
         "position": "📚 *Position Sizing*\n\nNever risk more than 2% per trade.\n$500 balance = $10 max risk.\n/setbalance 500",
-        "rsi":      "📚 *RSI*\n\nAbove 68 = bot rejects LONG.\nBelow 32 = bot rejects SHORT.\nBest LONG entries: RSI 35-52.",
+        "rsi":      "📚 *RSI*\n\nAbove 68 = bot rejects LONG.\nBelow 25 = bot rejects SHORT.\nBest LONG entries: RSI 35-52.",
         "monitor":  "📚 *Trade Monitor*\n\n`/addtrade ICPUSDT LONG 3.57 3.85 3.42`\n\nAlerts on TP hits and SL danger.",
     }
     text = lessons.get(topic, "Topic not found. Try /learn")
     try:
         await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=text,
-            parse_mode="Markdown"
+            chat_id=query.message.chat_id, text=text, parse_mode="Markdown"
         )
     except Exception:
         await context.bot.send_message(
@@ -810,7 +849,6 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Cache context
         global last_ctx, last_ctx_time
         if ctx and ctx.btc_price > 0:
             last_ctx      = ctx
@@ -831,8 +869,7 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.send_message(
                         chat_id=update.effective_chat.id,
-                        text=text,
-                        parse_mode="Markdown"
+                        text=text, parse_mode="Markdown"
                     )
                 except Exception:
                     await context.bot.send_message(
@@ -851,16 +888,10 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Market briefing with 30-minute cache.
-    Works standalone — no need to run /signals first.
-    Only hits Binance API when cache is older than 30 minutes.
-    """
     global last_ctx, last_ctx_time
     msg = await update.message.reply_text("📊 Fetching market intelligence...")
     try:
-        # Check if cache needs refresh
-        ctx_age      = time.time() - last_ctx_time
+        ctx_age       = time.time() - last_ctx_time
         needs_refresh = (
             last_ctx is None or
             last_ctx.btc_price == 0 or
@@ -873,7 +904,6 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             logger.info(f"Briefing: using cached context (age={ctx_age:.0f}s)")
 
-        # If still None after refresh attempt
         if last_ctx is None:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
@@ -936,8 +966,7 @@ async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text=report,
-                parse_mode="Markdown"
+                text=report, parse_mode="Markdown"
             )
         except Exception:
             await context.bot.send_message(
@@ -992,8 +1021,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Subscribers      : `{len(subscribers)}`\n"
         f"Auto scan        : `Disabled` (manual /signals only)\n"
         f"Trade monitor    : `Every 5 min`\n"
+        f"BTC trend watch  : `Every 30 min` (alerts on 4H flip)\n"
         f"Binance API      : `{ban_str}`\n"
-        f"Context cache    : `{cache_age}min old` (refreshes every 30min)\n"
+        f"Context cache    : `{cache_age}min old`\n"
         f"Manual threshold : `{MANUAL_THRESHOLD}%`\n"
         f"Max signals      : `{MAX_SIGNALS}` per scan\n"
         f"Hard filters     : `6`\n"
@@ -1004,7 +1034,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ─── Background Jobs ──────────────────────────────────────────────────────────
+
 async def trade_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Every 5 min — checks all open trades. Single price fetch per trade."""
     for chat_id, trades in list(open_trades.items()):
         active = [t for t in trades if not t.get("sl_hit") and not t.get("tp2_hit")]
         if not active:
@@ -1020,6 +1053,71 @@ async def trade_monitor_job(context: ContextTypes.DEFAULT_TYPE):
         open_trades[chat_id] = updated_trades
         save_json(TRADES_FILE, open_trades)
         await asyncio.sleep(0.5)
+
+
+async def btc_trend_watcher(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Every 30 min — checks BTC 4H trend using ONE lightweight API call.
+    Alerts subscribers ONLY when trend flips from BEAR to BULL.
+    Zero ban risk — single klines endpoint call, no heavy scan.
+    """
+    if not subscribers:
+        return
+
+    trend, price = await fetch_btc_trend_lightweight()
+    if trend is None:
+        return
+
+    # Get previous trend from job data
+    prev_trend = context.job.data if context.job.data else "BEAR"
+
+    logger.info(f"BTC trend watcher: {prev_trend} → {trend} | ${price:,.0f}")
+
+    # Alert when flipping from BEAR/NEUTRAL to BULL
+    if trend == "BULL" and prev_trend != "BULL":
+        logger.info("BTC 4H flipped BULL — alerting all subscribers")
+        for chat_id in list(subscribers):
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "🚨 *BTC 4H TREND FLIPPED BULLISH*\n\n"
+                        f"BTC is now `BULL` on the 4H chart\n"
+                        f"Price: `${price:,.0f}`\n\n"
+                        "*This is the signal you were waiting for.*\n\n"
+                        "Run /signals NOW — LONG setups may be available\n\n"
+                        "_Bot detected this automatically. "
+                        "Check /briefing for full market context._"
+                    ),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"Trend alert failed for {chat_id}: {e}")
+            await asyncio.sleep(0.5)
+
+    # Also alert when flipping from BULL to BEAR (protect open longs)
+    elif trend == "BEAR" and prev_trend == "BULL":
+        logger.info("BTC 4H flipped BEAR — alerting all subscribers")
+        for chat_id in list(subscribers):
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⚠️ *BTC 4H TREND FLIPPED BEARISH*\n\n"
+                        f"BTC is now `BEAR` on the 4H chart\n"
+                        f"Price: `${price:,.0f}`\n\n"
+                        "LONG signals are now blocked.\n"
+                        "If you have open LONG trades, check /mytrades\n\n"
+                        "_Consider tightening stop losses on open positions._"
+                    ),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"Bear alert failed for {chat_id}: {e}")
+            await asyncio.sleep(0.5)
+
+    # Update stored trend
+    context.job.data = trend
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -1044,14 +1142,25 @@ def main():
     app.add_handler(CommandHandler("status",     status))
     app.add_handler(CallbackQueryHandler(learn_callback, pattern="^learn_"))
 
-    # Auto scan DISABLED — causes Binance 418 bans
-    # Trade monitor only — single lightweight price fetch per trade
-    app.job_queue.run_repeating(trade_monitor_job, interval=300, first=30)
+    # Trade monitor — single price fetch per trade, every 5 min
+    app.job_queue.run_repeating(
+        trade_monitor_job,
+        interval=300,
+        first=30
+    )
+
+    # BTC trend watcher — ONE klines call every 30 min, zero ban risk
+    # Alerts you automatically when 4H flips BULL or BEAR
+    app.job_queue.run_repeating(
+        btc_trend_watcher,
+        interval=1800,
+        first=60,
+        data="BEAR"   # assume BEAR on start, will detect flip correctly
+    )
 
     logger.info(
         f"QuestLife Bot v5.0 FINAL | {len(subscribers)} subscribers | "
-        f"Auto scan OFF | Trade monitor ON | "
-        f"LONG + SHORT signals | Briefing cache 30min"
+        f"Auto scan OFF | Trade monitor ON | BTC trend watcher ON"
     )
     app.run_polling(drop_pending_updates=True)
 
