@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 MIN_24H_VOLUME_USDT = 10_000_000
 MAX_FUNDING_RATE    = 0.0015
 MIN_ADX             = 22
-MANUAL_THRESHOLD    = 75
+MANUAL_THRESHOLD    = 65
 AUTO_THRESHOLD      = 85
 MAX_SIGNALS         = 5
 MAX_LONGS           = 3
@@ -320,7 +320,6 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
     rsi   = last["RSI_14"]
     atr   = last["ATR_14"]
 
-    if adx < MIN_ADX: return None
     if pd.isna(atr) or atr == 0 or atr < entry * 0.0001: return None
 
     score = 0; direction = None; reasons = []
@@ -332,6 +331,12 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
 
     # BTC Gate
     if coin != "BTC" and direction == "LONG" and ctx.btc_is_bearish(): return None
+
+    # ADX filter — direction aware
+    # SHORTs allowed at ADX 18+ (downtrends have naturally lower ADX)
+    # LONGs require ADX 22+ (need stronger trend to go long)
+    adx_min = 12 if direction == "SHORT" else MIN_ADX
+    if adx < adx_min: return None
 
     # Pillar 2: EMA 200 (10pts)
     ema200 = last["EMA_200"]
