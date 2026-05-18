@@ -346,14 +346,16 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
         elif direction == "LONG"  and entry < ema200: score -= 5;  reasons.append("BelowEMA200!")
         elif direction == "SHORT" and entry > ema200: score -= 5;  reasons.append("AboveEMA200!")
 
-    # Hard Filter: 4H MTF must confirm
-    if direction == "LONG"  and not (l4h["EMA_20"] > l4h["EMA_50"]): return None
-    if direction == "SHORT" and not (l4h["EMA_20"] < l4h["EMA_50"]): return None
+    # Hard Filter: 4H MTF confirmation
+    # LONGs: 4H must be bullish (strict)
+    # SHORTs: 4H must NOT be strongly bullish (relaxed for slow bleed markets)
+    if direction == "LONG" and not (l4h["EMA_20"] > l4h["EMA_50"]): return None
+    if direction == "SHORT" and (l4h["EMA_20"] > l4h["EMA_50"] * 1.02): return None
     score += 15; reasons.append("4H✓")
 
     # Hard Filter: No chasing
     if direction == "LONG"  and rsi > 68: return None
-    if direction == "SHORT" and rsi < 32: return None
+    if direction == "SHORT" and rsi < 25: return None  # relaxed from 32 for slow bleeds
 
     # Pillar 3: MACD (10pts)
     macd      = last["MACD"]
