@@ -13,6 +13,7 @@ from telegram.ext import (
 )
 
 from engine import get_top_signals, MANUAL_THRESHOLD, MAX_SIGNALS
+from scalp_engine import get_scalp_signals, SCALP_THRESHOLD
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -510,8 +511,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. /setbalance 500 — enter your USDT balance\n"
         "2. /learn — understand the basics\n\n"
         "📋 *Commands:*\n"
-        "/signals — scan now\n"
-        "/top — best signal now\n"
+        "/signals — swing scan (hours/days holds)\n"
+        "/scalp — scalp scan (5m chart, 10-45 min holds)\n"
+        "/top — best swing signal now\n"
         "/top5 — see top 5 coins closest to qualifying\n"
         "/briefing — market overview\n"
         "/addtrade — register trade to monitor\n"
@@ -765,6 +767,134 @@ async def learn_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=query.message.chat_id,
             text=text.replace("*","").replace("`","")
         )
+
+
+async def scalp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /scalp — scans top 15 liquid pairs on 5m+15m timeframes.
+    Works in ranging AND trending markets.
+    Targets: 0.5-1.5% | SL: 0.3-0.5% | Hold: 10-45 min
+    YOU MUST BE AT YOUR PHONE — enter within 2-3 min of alert.
+    """
+    chat_id = update.effective_chat.id
+    now     = asyncio.get_event_loop().time()
+
+    # Separate cooldown for scalp (60 seconds)
+    scalp_key = f"scalp_{chat_id}"
+    if scalp_key in last_scan_time and (now - last_scan_time[scalp_key]) < 60:
+        wait = int(60 - (now - last_scan_time[scalp_key]))
+        await update.message.reply_text(f"⏳ Please wait {wait}s before scalp scanning again.")
+        return
+    last_scan_time[scalp_key] = now
+
+    msg = await update.message.reply_text(
+        "⚡ Running scalp scan on 5m + 15m charts...\n"
+        "_Checking top 15 pairs by liquidity_",
+        parse_mode="Markdown"
+    )
+
+    try:
+        results, btc_price = await get_scalp_signals()
+
+        if not results:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "📭 *No scalp setups right now.*\n\n"
+                    f"Scanned 15 pairs on 5m+15m. Nothing scored {SCALP_THRESHOLD}%+.\n\n"
+                    "Try again in 5-10 minutes — scalp conditions change quickly.\n\n"
+                    "_Best scalp conditions: BTC making a move + volume spike on alts_"
+                ),
+                parse_mode="Markdown"
+            )
+            return
+
+        ts       = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).strftime("%H:%M UTC")
+        btc_str  = f"${btc_price:,.0f}" if btc_price > 0 else "N/A"
+        balance  = balances.get(str(chat_id), 0)
+
+        header = (
+            f"⚡ *SCALP SIGNALS — 5m CHART*  `{ts}`\n"
+            f"BTC: `{btc_str}` | Pairs scanned: `15`\n"
+            f"⚠️ _Enter within 2-3 minutes or skip_\n\n"
+            f"*{len(results)} setup(s) found — {SCALP_THRESHOLD}%+ score*\n\n"
+        )
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=header, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=header.replace("*","").replace("`","").replace("_",""))
+
+        for i, res in enumerate(results):
+            medal   = {0:"🥇",1:"🥈",2:"🥉"}.get(i,"💎")
+            score   = res["score"]
+            is_long = "LONG" in res["dir"]
+            sym     = res["symbol"].replace("/USDT","")
+            dir_    = "LONG" if is_long else "SHORT"
+
+            # Position size for scalp
+            pos_line = ""
+            if balance and balance > 0:
+                risk      = balance * 0.01   # 1% risk for scalps (smaller than swing)
+                pos_size  = risk / (res["sl_pct"] / 100)
+                margin    = pos_size / res["lev"]
+                profit_tp2 = risk * res["rr"]
+                pos_line = (
+                    f"\n💰 *Position (1% risk for scalp):*\n"
+                    f"Put in  : `${margin:.2f}` USDT\n"
+                    f"Max loss: `${risk:.2f}` if SL hits\n"
+                    f"If TP2  : `+${profit_tp2:.2f}` profit\n"
+                )
+
+            signal_text = (
+                f"{medal} *{res['symbol']}* {res['dir']}\n"
+                f"Score   : `{score}pts` | Timeframe: `5m`\n"
+                f"Entry   : `{fmt(res['entry'])}`\n"
+                f"TP1     : `{fmt(res['tp1'])}` _(+{res['tp1_pct']}% — take 50% here)_\n"
+                f"TP2     : `{fmt(res['tp2'])}` _(+{res['tp2_pct']}% — close rest)_\n"
+                f"SL      : `{fmt(res['sl'])}` _({res['sl_pct']}% away — TIGHT)_\n"
+                f"Leverage: `{res['lev']}x` | R:R `1:{res['rr']}`\n"
+                f"RSI(7)  : `{res['rsi']}` | Vol: `${res['vol_24h_m']:.0f}M`\n"
+                f"{pos_line}\n"
+                f"Reason  : _{res['reasons'][:85]}_\n\n"
+                f"📖 *Quick Entry:*\n"
+                f"Binance → Futures → `{sym}` → `{res['lev']}x` → "
+                f"`{'BUY' if is_long else 'SELL'}` at `{fmt(res['entry'])}`\n"
+                f"Set SL `{fmt(res['sl'])}` immediately\n"
+                f"TP1 `{fmt(res['tp1'])}` → close 50%\n"
+                f"TP2 `{fmt(res['tp2'])}` → close rest\n\n"
+                f"⚠️ _Scalp rule: If not filled in 3 min — cancel and skip_"
+            )
+
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=signal_text, parse_mode="Markdown")
+            except Exception:
+                await context.bot.send_message(chat_id=chat_id, text=signal_text.replace("*","").replace("`","").replace("_",""))
+            await asyncio.sleep(0.3)
+
+        # Scalp rules footer
+        footer = (
+            "⚡ *Scalp Rules:*\n"
+            "• Enter within 2-3 min or skip entirely\n"
+            "• Take 50% profit at TP1 — don't be greedy\n"
+            "• Move SL to entry after TP1 hits\n"
+            "• Close entire trade at TP2\n"
+            "• Max 1% risk per scalp trade\n"
+            "• If price goes 0.2% against you immediately — close it\n\n"
+            "_Scalp signals expire fast. Use /scalp again for fresh scan._"
+        )
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=footer, parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=footer.replace("*","").replace("`","").replace("_",""))
+
+    except Exception as e:
+        logger.error(f"/scalp: {e}", exc_info=True)
+        await update.message.reply_text("⚠️ Scalp scan error. Try again in a moment.")
+    finally:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
 
 
 async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1216,6 +1346,7 @@ def main():
 
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("signals",    signals))
+    app.add_handler(CommandHandler("scalp",      scalp))
     app.add_handler(CommandHandler("top",        top))
     app.add_handler(CommandHandler("top5",       top5))
     app.add_handler(CommandHandler("briefing",   briefing))
@@ -1236,7 +1367,7 @@ def main():
 
     logger.info(
         f"QuestLife Bot v5.0 FINAL | {len(subscribers)} subscribers | "
-        f"Auto scan OFF | Trade monitor ON | BTC watcher ON | /top5 added"
+        f"Auto scan OFF | Trade monitor ON | BTC watcher ON | Scalp module ON"
     )
     app.run_polling(drop_pending_updates=True)
 
