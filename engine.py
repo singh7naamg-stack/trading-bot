@@ -1,3 +1,7 @@
+# engine.py v7.0 — Condition-Based Signals
+# Works in trending AND ranging AND slow bleed markets
+# No ADX minimum — uses EMA + MACD + RSI conditions instead
+
 import asyncio
 import logging
 import os
@@ -148,71 +152,62 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
     if pd.isna(atr) or atr == 0:
         return None
 
-    # Direction from 1H EMA9 vs EMA21
-    if e9_1h > e21_1h:
-        direction = "LONG"
-    elif e9_1h < e21_1h:
+    # ── Determine direction from 4H bias first ────────────────────────────────
+    # 4H is the primary trend direction
+    # 1H is confirmation only — not the gatekeeper
+    bear_4h = (close_4h < e50_4h) or (e50_4h < h4p["EMA_50"] * 1.0005) or (e9_4h < e21_4h)
+    bull_4h = (close_4h > e50_4h) or (e9_4h > e21_4h)
+    oversold = rsi7 < 38 and rsi14 < 42
+
+    if bear_4h and not ctx.btc_is_bullish():
         direction = "SHORT"
+    elif bull_4h and not ctx.btc_is_bearish():
+        direction = "LONG"
+    elif oversold and not ctx.btc_is_bearish():
+        direction = "LONG"  # oversold bounce even in neutral market
     else:
-        return None
+        return None  # no clear direction
 
     reasons = []
 
     # ── Core Conditions ───────────────────────────────────────────────────────
     if direction == "SHORT":
-        # C1: 4H must show bearish bias
-        bear_4h = (close_4h < e50_4h) or (e50_4h < h4p["EMA_50"] * 1.0005) or (e9_4h < e21_4h)
-        if not bear_4h:
-            return None
         reasons.append("4H-Bear")
 
-        # C2: RSI must have room to fall (not already oversold)
+        # RSI must have room to fall
         if rsi14 < 35 or rsi14 > 78:
             return None
         reasons.append(f"RSI-OK({rsi14:.0f})")
 
-        # C3: MACD must be bearish or fresh cross
+        # MACD: bearish, fresh cross, or declining
         if pd.isna(macd_h):
             return None
         if macd_h < 0:
             reasons.append("MACD-Bear")
         elif pd.notna(macd_hp) and macd_hp > 0 and macd_h <= 0:
             reasons.append("MACD-FreshBear")
-        elif macd_h < macd_hp:  # MACD declining even if still positive
+        elif pd.notna(macd_hp) and macd_h < macd_hp:
             reasons.append("MACD-Declining")
         else:
-            return None  # MACD rising — don't short
+            return None  # MACD rising — skip
 
-        # C4: Funding not overcrowded short
+        # Funding not overcrowded short
         if funding_rate is not None and funding_rate < -0.0008:
             return None
         reasons.append("FR-OK")
 
-        # C5: BTC still bearish (don't short alts if BTC bouncing)
-        if coin != "BTC" and ctx.btc_is_bullish():
-            return None
-
     else:  # LONG
-        # C1: 4H must show bullish bias OR oversold bounce
-        bull_4h      = (close_4h > e50_4h) or (e9_4h > e21_4h)
-        oversold     = rsi7 < 38 and rsi14 < 42
-        if not bull_4h and not oversold:
-            return None
         if oversold:
             reasons.append("OversoldBounce")
         else:
             reasons.append("4H-Bull")
 
-        # C2: BTC gate
-        if coin != "BTC" and ctx.btc_is_bearish() and not oversold:
-            return None
-
-        # C3: RSI not overbought
+        # RSI not overbought
         if rsi14 > 68:
             return None
         reasons.append(f"RSI-OK({rsi14:.0f})")
 
-        # C4: MACD bullish
+        # MACD: bullish or fresh cross
         if pd.isna(macd_h):
             return None
         if macd_h > 0:
@@ -220,9 +215,9 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
         elif pd.notna(macd_hp) and macd_hp < 0 and macd_h >= 0:
             reasons.append("MACD-FreshBull")
         else:
-            return None  # MACD bearish
+            return None  # MACD still bearish
 
-        # C5: Funding not overcrowded long
+        # Funding not overcrowded long
         if funding_rate is not None and funding_rate > 0.001:
             return None
         reasons.append("FR-OK")
