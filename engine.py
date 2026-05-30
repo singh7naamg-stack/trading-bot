@@ -178,8 +178,10 @@ async def analyze_symbol(exchange, symbol, ticker, funding_rate, ctx):
             reasons.append("MACD-Bear")
         elif pd.notna(macd_hp) and macd_hp > 0 and macd_h <= 0:
             reasons.append("MACD-FreshBear")
+        elif macd_h < macd_hp:  # MACD declining even if still positive
+            reasons.append("MACD-Declining")
         else:
-            return None  # MACD still bullish
+            return None  # MACD rising — don't short
 
         # C4: Funding not overcrowded short
         if funding_rate is not None and funding_rate < -0.0008:
