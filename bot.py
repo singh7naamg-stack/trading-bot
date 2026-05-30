@@ -1,30 +1,3 @@
-# ============================================================
-#  QuestLife Signal Bot — engine.py  v7.0 CONDITION-BASED
-#
-#  Complete rethink. Instead of scoring 13 pillars and hoping
-#  the total reaches a threshold (which fails in ranging markets),
-#  this version checks specific CONDITIONS that must all be true.
-#
-#  LONG conditions (all must pass):
-#    1. Price above 4H EMA50 (or oversold bounce with RSI < 35)
-#    2. 1H EMA9 > EMA21 (short term bullish)
-#    3. RSI 14 between 30-60 (not chasing)
-#    4. MACD histogram positive or fresh cross
-#    5. Volume not collapsing
-#    6. Not extreme overbought on 4H RSI
-#
-#  SHORT conditions (all must pass):
-#    1. Price below 4H EMA50 (confirmed bear bias)
-#    2. 1H EMA9 < EMA21 (short term bearish)
-#    3. RSI 14 between 40-72 (not oversold, has room to fall)
-#    4. MACD histogram negative or fresh bearish cross
-#    5. Volume present
-#    6. Funding rate not extremely negative (shorts not overcrowded)
-#
-#  Quality scoring (0-100) on top of conditions to rank signals
-#  Threshold: 55 — much more achievable
-# ============================================================
-
 import asyncio
 import logging
 import os
