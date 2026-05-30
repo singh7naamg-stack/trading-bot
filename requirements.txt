@@ -5,3 +5,5 @@ numpy
 ta
 python-dotenv
 aiohttp
+flask
+flask-cors
