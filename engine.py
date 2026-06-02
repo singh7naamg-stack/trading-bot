@@ -46,7 +46,7 @@ from market_intel import MarketContext, build_market_context
 logger = logging.getLogger(__name__)
 
 # ─── Settings ─────────────────────────────────────────────
-MANUAL_THRESHOLD    = 60   # out of 100
+MANUAL_THRESHOLD    = 50   # lowered — fires in slow bleed markets
 AUTO_THRESHOLD      = 75
 MAX_SIGNALS         = 5
 MAX_LONGS           = 3
@@ -428,48 +428,78 @@ async def analyze_symbol(exchange, symbol, ticker, fr, ctx):
     score     = 0
     reasons   = []
 
-    # ── Strategy selection based on regime ────────────────────────────────
-    if regime == "BEAR" or ctx.btc_is_bearish():
-        # Primary strategy: SHORT pullbacks in downtrend
-        s, r = detect_pullback_short(df1h, df4h)
-        if s > 0:
-            direction = "SHORT"
-            score     = s
-            reasons   = r
+    # ── Always check BOTH directions, pick the highest scoring ───────────────
+    # SHORT: pullback in downtrend (works in BEAR)
+    # LONG:  pullback to support (works in BULL)
+    # LONG:  oversold bounce (works in ANY regime when RSI < 30)
+    #
+    # This means:
+    # BEAR market → tries SHORT first, but LONG bounce also checked
+    # BULL market → tries LONG first, but SHORT also checked
+    # RSI < 30 anywhere → oversold bounce LONG always checked
 
-        # Secondary: oversold bounce LONG (only in extreme conditions)
-        if direction is None:
-            s2, r2 = detect_oversold_bounce(df1h, df4h)
-            if s2 >= 60:
+    short_score, short_reasons = detect_pullback_short(df1h, df4h)
+    long_score,  long_reasons  = detect_pullback_long(df1h, df4h)
+    bounce_score, bounce_reasons = detect_oversold_bounce(df1h, df4h)
+
+    # Use oversold bounce if RSI is extreme (overrides everything)
+    if bounce_score >= 50:
+        direction = "LONG"
+        score     = bounce_score
+        reasons   = bounce_reasons
+        reasons.append(f"{regime}-Bounce")
+
+    # Otherwise pick highest scoring direction
+    elif short_score > 0 or long_score > 0:
+        # In BEAR: prefer SHORT but allow LONG if much higher score
+        if regime == "BEAR" or ctx.btc_is_bearish():
+            if short_score >= long_score:
+                direction = "SHORT"
+                score     = short_score
+                reasons   = short_reasons
+                reasons.append(f"BEAR({regime_score})")
+            elif long_score > short_score + 15:
+                # Only override to LONG if score is significantly better
                 direction = "LONG"
-                score     = s2
-                reasons   = r2
-                reasons.append("BearBounce")
+                score     = long_score
+                reasons   = long_reasons
+                reasons.append(f"BearLong({regime_score})")
+            elif short_score > 0:
+                direction = "SHORT"
+                score     = short_score
+                reasons   = short_reasons
+                reasons.append(f"BEAR({regime_score})")
 
-    elif regime == "BULL" and not ctx.btc_is_bearish():
-        # Primary strategy: LONG pullbacks in uptrend
-        s, r = detect_pullback_long(df1h, df4h)
-        if s > 0:
-            direction = "LONG"
-            score     = s
-            reasons   = r
+        # In BULL: prefer LONG but allow SHORT if much higher score
+        elif regime == "BULL" or ctx.btc_is_bullish():
+            if long_score >= short_score:
+                direction = "LONG"
+                score     = long_score
+                reasons   = long_reasons
+                reasons.append(f"BULL({regime_score})")
+            elif short_score > long_score + 15:
+                direction = "SHORT"
+                score     = short_score
+                reasons   = short_reasons
+                reasons.append(f"BullShort({regime_score})")
+            elif long_score > 0:
+                direction = "LONG"
+                score     = long_score
+                reasons   = long_reasons
+                reasons.append(f"BULL({regime_score})")
 
-    elif regime == "RANGING":
-        # In ranging market: look for extremes
-        rsi = df1h.iloc[-1]["rsi"]
-        bb  = df1h.iloc[-1]["bb_pct"]
-
-        # Short at upper band
-        if pd.notna(bb) and bb > 0.85 and rsi > 60:
-            s, r = detect_pullback_short(df1h, df4h)
-            if s >= 50:
-                direction = "SHORT"; score = s; reasons = r; reasons.append("Range-Short")
-
-        # Long at lower band
-        elif pd.notna(bb) and bb < 0.15 and rsi < 40:
-            s, r = detect_oversold_bounce(df1h, df4h)
-            if s >= 50:
-                direction = "LONG"; score = s; reasons = r; reasons.append("Range-Long")
+        # RANGING: pick whichever is higher
+        else:
+            if short_score >= long_score and short_score > 0:
+                direction = "SHORT"
+                score     = short_score
+                reasons   = short_reasons
+                reasons.append(f"RANGE({regime_score})")
+            elif long_score > 0:
+                direction = "LONG"
+                score     = long_score
+                reasons   = long_reasons
+                reasons.append(f"RANGE({regime_score})")
 
     if direction is None or score == 0:
         return None
