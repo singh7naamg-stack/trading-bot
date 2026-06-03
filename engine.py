@@ -46,12 +46,12 @@ from market_intel import MarketContext, build_market_context
 logger = logging.getLogger(__name__)
 
 # ─── Settings ─────────────────────────────────────────────
-MANUAL_THRESHOLD    = 50   # lowered — fires in slow bleed markets
+MANUAL_THRESHOLD    = 45   # fires in slow bleed & ranging markets
 AUTO_THRESHOLD      = 75
 MAX_SIGNALS         = 5
 MAX_LONGS           = 3
 MAX_SHORTS          = 3
-MIN_24H_VOLUME_USDT = 15_000_000   # $15M min — liquid coins only
+MIN_24H_VOLUME_USDT = 10_000_000   # $10M min — broader coverage
 BAN_FILE            = "/data/ban_until.txt"
 
 
@@ -203,64 +203,63 @@ def detect_pullback_short(df1h, df4h):
     if atr == 0 or pd.isna(atr): return 0, []
 
     # ── Must-have: price in bearish structure on 1H ────────────────────────
-    # Price should be below EMA50 (downtrend intact on 1H)
     if close < ema50:
         score += 20; reasons.append("Below1H-EMA50")
     elif close < ema50 * 1.02:
-        score += 10; reasons.append("Near1H-EMA50")
+        score += 12; reasons.append("Near1H-EMA50")
+    elif close < ema50 * 1.04:
+        score += 5;  reasons.append("SlightlyAboveEMA50")
     else:
-        return 0, []  # price too far above EMA50 — no short setup
+        return 0, []
 
     # ── RSI in the right zone ──────────────────────────────────────────────
-    # For a pullback short: RSI should be between 40-68
-    # Below 35 = already sold off too much, risky to short
-    # Above 70 = overbought, could work but too aggressive
-    if rsi < 35:
-        return 0, []  # already oversold — no short
+    if rsi < 32:
+        return 0, []
     elif 40 <= rsi <= 55:
-        score += 25; reasons.append(f"RSI-Ideal({rsi:.0f})")   # best zone
+        score += 25; reasons.append(f"RSI-Ideal({rsi:.0f})")
     elif 55 < rsi <= 65:
         score += 18; reasons.append(f"RSI-Good({rsi:.0f})")
-    elif 35 <= rsi < 40:
+    elif 32 <= rsi < 40:
         score += 8;  reasons.append(f"RSI-Low({rsi:.0f})")
     elif 65 < rsi <= 72:
-        score += 12; reasons.append(f"RSI-High({rsi:.0f})")
+        score += 14; reasons.append(f"RSI-High({rsi:.0f})")
+    elif 72 < rsi <= 78:
+        score += 8;  reasons.append(f"RSI-OB({rsi:.0f})")
     else:
-        return 0, []  # RSI above 72 — too risky
+        return 0, []
 
     # ── MACD momentum check ────────────────────────────────────────────────
-    # MACD should be negative OR turning negative
     if pd.notna(macd_h) and pd.notna(prev_h):
         if macd_h < 0 and prev_h < 0:
-            score += 20; reasons.append("MACD-Bear")          # confirmed bearish
+            score += 20; reasons.append("MACD-Bear")
         elif macd_h < 0 and prev_h >= 0:
-            score += 25; reasons.append("MACD-TurnedBear")    # just turned — best entry
+            score += 25; reasons.append("MACD-TurnedBear")
         elif macd_h < prev_h and macd_h < 0.3 * abs(prev_h if prev_h != 0 else 1):
-            score += 15; reasons.append("MACD-Weakening")     # losing momentum
+            score += 15; reasons.append("MACD-Weakening")
         elif macd_h > 0 and macd_h < prev_h:
-            score += 8;  reasons.append("MACD-Declining")     # declining but positive
+            score += 8;  reasons.append("MACD-Declining")
         else:
-            score += 0   # MACD clearly bullish — still allow but no bonus
+            score += 0
     else:
         return 0, []
 
     # ── EMA8 / EMA21 relationship ──────────────────────────────────────────
     if ema8 < ema21:
-        score += 12; reasons.append("EMA8<21")      # 1H bearish aligned
+        score += 12; reasons.append("EMA8<21")
     elif ema8 < ema21 * 1.005:
-        score += 5;  reasons.append("EMA8~21")      # near cross
+        score += 5;  reasons.append("EMA8~21")
     else:
-        score -= 5                                   # EMA still bullish on 1H
+        score -= 5
 
     # ── Bollinger Band position ────────────────────────────────────────────
     bb_pct = last["bb_pct"]
     if pd.notna(bb_pct):
         if bb_pct > 0.8:
-            score += 8;  reasons.append("BB-Upper")    # at upper band — short entry
+            score += 8;  reasons.append("BB-Upper")
         elif bb_pct > 0.6:
             score += 5;  reasons.append("BB-High")
         elif bb_pct < 0.2:
-            score -= 8                                  # at lower band — risky to short
+            score -= 8
 
     # ── OBV ───────────────────────────────────────────────────────────────
     if pd.notna(last["obv_e"]):
@@ -299,21 +298,25 @@ def detect_pullback_long(df1h, df4h):
 
     if atr == 0 or pd.isna(atr): return 0, []
 
-    # Price must be above EMA50 (uptrend intact)
+    # Price must be near/above EMA50 (uptrend or pullback to it)
     if close > ema50:
         score += 20; reasons.append("Above1H-EMA50")
-    elif close > ema50 * 0.98:
-        score += 10; reasons.append("Near1H-EMA50")
+    elif close > ema50 * 0.97:
+        score += 12; reasons.append("Near1H-EMA50")
+    elif close > ema50 * 0.95:
+        score += 5;  reasons.append("BelowEMA50-DeepPullback")
     else:
         return 0, []
 
     # RSI in pullback zone
-    if rsi > 68:
-        return 0, []  # overbought
+    if rsi > 72:
+        return 0, []
     elif 35 <= rsi <= 52:
         score += 25; reasons.append(f"RSI-Pullback({rsi:.0f})")
     elif 52 < rsi <= 62:
         score += 15; reasons.append(f"RSI-OK({rsi:.0f})")
+    elif 62 < rsi <= 72:
+        score += 8;  reasons.append(f"RSI-Elevated({rsi:.0f})")
     elif rsi < 35:
         score += 10; reasons.append(f"RSI-Oversold({rsi:.0f})")
     else:
@@ -326,9 +329,11 @@ def detect_pullback_long(df1h, df4h):
         elif macd_h > 0:
             score += 18; reasons.append("MACD-Bull")
         elif macd_h > prev_h:
-            score += 10; reasons.append("MACD-Rising")
-        else:
-            return 0, []  # MACD declining — skip
+            score += 12; reasons.append("MACD-Rising")
+        elif macd_h < 0 and macd_h > prev_h * 0.5:
+            score += 5;  reasons.append("MACD-Bottoming")
+        elif macd_h < 0:
+            score += 2;  reasons.append("MACD-Bear")
     else:
         return 0, []
 
@@ -362,7 +367,6 @@ def detect_oversold_bounce(df1h, df4h):
     Special setup: extreme oversold bounce.
     Works even in bear markets for quick LONG recovery trades.
     RSI below 28, MACD turning up, price at BB lower band.
-    High risk/high reward — only fires on extreme conditions.
     """
     last   = df1h.iloc[-1]
     prev   = df1h.iloc[-2]
@@ -378,20 +382,19 @@ def detect_oversold_bounce(df1h, df4h):
     score   = 0
     reasons = []
 
-    # Extreme oversold
-    if rsi < 22:   score += 30; reasons.append(f"ExtemeOversold({rsi:.0f})")
+    if rsi < 22:   score += 30; reasons.append(f"ExtremeOversold({rsi:.0f})")
     elif rsi < 28: score += 20; reasons.append(f"VeryOversold({rsi:.0f})")
     else: return 0, []
 
-    # MACD turning up
     if macd_h > prev_h: score += 20; reasons.append("MACD-TurningUp")
     else: return 0, []
 
-    # At BB lower band
     if pd.notna(bb_pct) and bb_pct < 0.1:
         score += 20; reasons.append("AtBB-Lower")
     elif pd.notna(bb_pct) and bb_pct < 0.2:
-        score += 10; reasons.append("NearBB-Lower")
+        score += 12; reasons.append("NearBB-Lower")
+    elif pd.notna(bb_pct) and bb_pct < 0.35:
+        score += 5;  reasons.append("BB-LowZone")
     else:
         return 0, []
 
@@ -404,7 +407,7 @@ def detect_oversold_bounce(df1h, df4h):
 async def analyze_symbol(exchange, symbol, ticker, fr, ctx):
     vol = ticker.get("quoteVolume") or 0
     if vol < MIN_24H_VOLUME_USDT: return None
-    if fr is not None and abs(fr) > 0.002: return None
+    if fr is not None and abs(fr) > 0.003: return None
 
     df1h, df4h = await asyncio.gather(
         get_candles(exchange, symbol, "1h", 200),
@@ -420,7 +423,6 @@ async def analyze_symbol(exchange, symbol, ticker, fr, ctx):
     atr   = df1h.iloc[-1]["atr"]
     if pd.isna(atr) or atr == 0: return None
 
-    # Get market regime
     regime, regime_score = get_regime(df4h)
     coin = symbol.replace("/USDT:USDT","").replace("/USDT","")
 
@@ -428,30 +430,17 @@ async def analyze_symbol(exchange, symbol, ticker, fr, ctx):
     score     = 0
     reasons   = []
 
-    # ── Always check BOTH directions, pick the highest scoring ───────────────
-    # SHORT: pullback in downtrend (works in BEAR)
-    # LONG:  pullback to support (works in BULL)
-    # LONG:  oversold bounce (works in ANY regime when RSI < 30)
-    #
-    # This means:
-    # BEAR market → tries SHORT first, but LONG bounce also checked
-    # BULL market → tries LONG first, but SHORT also checked
-    # RSI < 30 anywhere → oversold bounce LONG always checked
-
-    short_score, short_reasons = detect_pullback_short(df1h, df4h)
-    long_score,  long_reasons  = detect_pullback_long(df1h, df4h)
+    short_score, short_reasons   = detect_pullback_short(df1h, df4h)
+    long_score,  long_reasons    = detect_pullback_long(df1h, df4h)
     bounce_score, bounce_reasons = detect_oversold_bounce(df1h, df4h)
 
-    # Use oversold bounce if RSI is extreme (overrides everything)
     if bounce_score >= 50:
         direction = "LONG"
         score     = bounce_score
         reasons   = bounce_reasons
         reasons.append(f"{regime}-Bounce")
 
-    # Otherwise pick highest scoring direction
     elif short_score > 0 or long_score > 0:
-        # In BEAR: prefer SHORT but allow LONG if much higher score
         if regime == "BEAR" or ctx.btc_is_bearish():
             if short_score >= long_score:
                 direction = "SHORT"
@@ -459,7 +448,6 @@ async def analyze_symbol(exchange, symbol, ticker, fr, ctx):
                 reasons   = short_reasons
                 reasons.append(f"BEAR({regime_score})")
             elif long_score > short_score + 15:
-                # Only override to LONG if score is significantly better
                 direction = "LONG"
                 score     = long_score
                 reasons   = long_reasons
@@ -470,7 +458,6 @@ async def analyze_symbol(exchange, symbol, ticker, fr, ctx):
                 reasons   = short_reasons
                 reasons.append(f"BEAR({regime_score})")
 
-        # In BULL: prefer LONG but allow SHORT if much higher score
         elif regime == "BULL" or ctx.btc_is_bullish():
             if long_score >= short_score:
                 direction = "LONG"
@@ -488,7 +475,6 @@ async def analyze_symbol(exchange, symbol, ticker, fr, ctx):
                 reasons   = long_reasons
                 reasons.append(f"BULL({regime_score})")
 
-        # RANGING: pick whichever is higher
         else:
             if short_score >= long_score and short_score > 0:
                 direction = "SHORT"
@@ -513,23 +499,38 @@ async def analyze_symbol(exchange, symbol, ticker, fr, ctx):
         if fg < 30:  score += 5; reasons.append(f"Fear({fg})")
         if ls > 1.3: score += 5; reasons.append(f"CrowdLong({ls:.2f})")
         if oi > 0.5: score += 3; reasons.append("OI↑")
-        if fr is not None and fr > 0.0002: score += 5; reasons.append(f"FR+")
+        if fr is not None and fr > 0.0002: score += 5; reasons.append("FR+")
     else:
         if fg < 25:  score += 8; reasons.append(f"ExtremeFear({fg})")
         if ls < 0.8: score += 5; reasons.append(f"CrowdShort({ls:.2f})")
         if fr is not None and fr < -0.0002: score += 5; reasons.append("FR-")
 
-    # Macro penalty
     if ctx.macro_event_today:
         pen = 8 if ctx.macro_event_impact == "HIGH" else 4
         score -= pen; reasons.append(f"Macro-{pen}")
+
+    # Volume surge bonus
+    last1h = df1h.iloc[-1]
+    if pd.notna(last1h.get("vol_ma")) and last1h["vol_ma"] > 0:
+        vol_ratio = last1h["v"] / last1h["vol_ma"]
+        if vol_ratio > 2.0:
+            score += 6; reasons.append(f"VolSurge({vol_ratio:.1f}x)")
+        elif vol_ratio > 1.5:
+            score += 3; reasons.append(f"HighVol({vol_ratio:.1f}x)")
+
+    # ADX strength bonus
+    adx_val = last1h.get("adx", 0)
+    if pd.notna(adx_val):
+        if adx_val > 30:
+            score += 5; reasons.append(f"ADX-Strong({adx_val:.0f})")
+        elif adx_val > 20:
+            score += 2; reasons.append(f"ADX-OK({adx_val:.0f})")
 
     score = max(0, min(100, score))
     if score < MANUAL_THRESHOLD:
         return None
 
     # ── TP/SL ──────────────────────────────────────────────────────────────
-    # Use ATR for SL, look for previous swing for TP
     atr = df1h.iloc[-1]["atr"]
 
     if direction == "LONG":
@@ -614,7 +615,7 @@ async def get_top_signals():
             [s for s in tickers if (tickers[s].get("quoteVolume") or 0) >= MIN_24H_VOLUME_USDT],
             key=lambda s: tickers[s].get("quoteVolume") or 0,
             reverse=True
-        )[:25]
+        )[:35]
 
         logger.info(f"Scanning {len(liquid)} pairs")
 
