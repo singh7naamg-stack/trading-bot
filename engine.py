@@ -389,7 +389,7 @@ def detect_oversold_bounce(df1h, df4h):
     if macd_h > prev_h: score += 20; reasons.append("MACD-TurningUp")
     else: return 0, []
 
-    if pd.notna(bb_pct) and bb_pct < 0.1:
+       if pd.notna(bb_pct) and bb_pct < 0.1:
         score += 20; reasons.append("AtBB-Lower")
     elif pd.notna(bb_pct) and bb_pct < 0.2:
         score += 12; reasons.append("NearBB-Lower")
