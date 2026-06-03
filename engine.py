@@ -52,7 +52,7 @@ MAX_SIGNALS         = 5
 MAX_LONGS           = 3
 MAX_SHORTS          = 3
 MIN_24H_VOLUME_USDT = 10_000_000   # $10M min — liquid coins only
-BAN_FILE            = "/data/ban_until.txt"
+BAN_FILE            = "data/ban_until.txt"
 
 
 # ─── Ban Handling ──────────────────────────────────────────
@@ -73,7 +73,7 @@ def get_ban_remaining_mins():
 
 def save_ban(ms):
     try:
-        os.makedirs("/data", exist_ok=True)
+        os.makedirs("data", exist_ok=True)
         ts = ms / 1000
         with open(BAN_FILE, "w") as f: f.write(str(ts))
         logger.error(f"Binance ban — {int((ts-time.time())/60)}min")
@@ -395,8 +395,8 @@ async def analyze_symbol(exchange, symbol, ticker, fr, ctx):
     if fr is not None and abs(fr) > 0.003: return None
 
     df1h, df4h = await asyncio.gather(
-        get_candles(exchange, symbol, "1h", 200),
-        get_candles(exchange, symbol, "4h", 100),
+        get_candles(exchange, symbol, "1h", 500),
+        get_candles(exchange, symbol, "4h", 500),
     )
     if df1h is None or df4h is None: return None
 
@@ -570,7 +570,8 @@ async def get_top_signals():
         futures = [s for s in markets if s.endswith("/USDT:USDT")]
 
         try:
-            tickers = await exchange.fetch_tickers(futures[:100])
+            all_tickers = await exchange.fetch_tickers()
+            tickers = {k: v for k, v in all_tickers.items() if k in futures}
         except Exception as e:
             if "418" in str(e):
                 m = re.search(r"banned until (\d+)", str(e))
