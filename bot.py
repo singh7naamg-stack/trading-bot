@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 TOKEN            = os.getenv("BOT_TOKEN")
-SUBSCRIBERS_FILE = "/data/subscribers.json"
-BALANCES_FILE    = "/data/balances.json"
-TRADES_FILE      = "/data/trades.json"
+SUBSCRIBERS_FILE = "data/subscribers.json"
+BALANCES_FILE    = "data/balances.json"
+TRADES_FILE      = "data/trades.json"
 COOLDOWN_SECS    = 120
 CTX_CACHE_SECS   = 1800
 
